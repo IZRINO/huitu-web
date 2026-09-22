@@ -36,6 +36,14 @@
 
 ### 命令行与 Agent 自动生图
 
+标准 Agent Skill 安装：
+
+```sh
+npx skills add IZRINO/huitu-web --skill huitu-image
+```
+
+技能入口：[skills/huitu-image/SKILL.md](skills/huitu-image/SKILL.md)。安装器只安装技能；首次调用按技能内说明安装 CLI、配置模型与密钥。也可将整个 `skills/huitu-image` 目录复制到 agent 的技能目录，所有参考文档均包含在包内。
+
 已提供独立 `huitu` CLI：支持网页全部参数、多组模型配置、持久共享队列（默认三个并发）、自动下载。完整安装、参数表和 agent 调用契约见 [CLI 文档](docs/cli.md)。
 
 ```powershell

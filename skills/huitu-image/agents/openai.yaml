@@ -1,4 +1,4 @@
 interface:
-  display_name: "绘途生图"
-  short_description: "调用自定义生图模型，批量排队、参考图改图并自动保存图片到本地目录"
-  default_prompt: "使用 $huitu-image 按我的提示词生成图片，复用已有模型配置，进入共享队列并返回下载后的文件。"
+  display_name: "Huitu Image Generation"
+  short_description: "Queue image generation and edits with automatic downloads"
+  default_prompt: "Use $huitu-image to generate images from my prompts, reuse my model profile, submit to the shared queue, and return the downloaded files."

@@ -1,35 +1,35 @@
 ---
 name: huitu-image
-description: 使用绘途 CLI 通过自定义 OpenAI Images 兼容接口生图、批量生图或参考图及蒙版改图。支持命名模型配置、持久共享队列、默认三并发、自动下载和结构化任务结果；适用于用户要求调用绘途或自有生图中转站的任务。
+description: Generate or edit images through a custom OpenAI Images-compatible endpoint using the bundled Huitu CLI. Use when the user requests Huitu or their own image API for single images, batch generation, reference-image edits, or masked edits, with named model profiles, a persistent shared queue, and automatic downloads.
 ---
 
-# 绘途生图
+# Huitu Image Generation
 
-使用技能自带的已编译 CLI 完成生成与文件落盘；只需要 Node.js 20.19+（20 系列）或 22.12+，无需克隆仓库、安装 npm 依赖或编译。
+Use the bundled, precompiled CLI to generate images and save them locally. Requires only Node.js 20.19+ in the 20.x series, or 22.12+. No repository clone, npm dependencies, or compilation is required.
 
-## 准备
+## Prepare
 
-1. 根据当前已加载技能的实际目录，找到 [scripts/huitu.mjs](scripts/huitu.mjs)。运行 `node` 加该文件的绝对路径及 `--help`，确认确有帮助输出。不依赖全局 `huitu` 命令；路径及配置示例见 [直接运行](references/install.md)。
-2. 用 `profile list --json`、`config show --json` 确认现有配置。复用用户选择的配置，不擅自替换模型、中转站或输出目录。缺少接口、模型或凭据时，只询问缺少的值；密钥可由用户设置为环境变量，不要求在对话中公开。
-3. 下文和参考文档中的 `huitu` 是命令简写：实际调用一律替换为 `node` 加本技能 `scripts/huitu.mjs` 的绝对路径。从任意项目目录调用均保持同一个 `HUITU_HOME`，才能共享三个并发名额。不要修改技能包内的编译文件，配置和生成图片由 CLI 保存到技能目录之外。
+1. Locate [scripts/huitu.mjs](scripts/huitu.mjs) relative to the actual directory of this loaded skill. Run `node` with its absolute path and `--help`; verify that help text is printed. Do not depend on a global `huitu` command. See [direct execution](references/install.md) for path and configuration examples.
+2. Inspect existing settings with `profile list --json` and `config show --json`. Reuse the user's chosen profile; do not silently replace the model, endpoint, or output directory. Ask only for missing endpoint, model, or credential information. Credentials can be supplied through local environment variables without exposing them in the conversation.
+3. Throughout this skill and its references, `huitu` is shorthand for `node` followed by the absolute path to this skill's `scripts/huitu.mjs`. Keep the same `HUITU_HOME` across project directories to share the three concurrency slots. Do not modify bundled compiled files; CLI configuration and generated images are stored outside the skill directory.
 
-## 提交与取回图片
+## Submit jobs and retrieve images
 
-- 提示词写入 UTF-8 文件，通过 `--prompt-file` 传入，避免 shell 转义损坏长提示词。文件路径使用绝对路径。
-- 单次生成：`huitu generate --profile main --prompt-file prompt.txt --json`。
-- 改图：`huitu edit --profile main --prompt-file prompt.txt --image input.png --mask mask.png --json`；`--image` 可重复，蒙版可省略。
-- 多任务先编写 JSON 数组，再执行 `huitu batch --input jobs.json --json`；不要启动彼此隔离的队列规避并发限制。
-- 保存返回的任务编号，再执行 `huitu jobs wait TASK_ID --wait-timeout 120 --json`。短任务也可在提交时指定 `--wait`。
-- 只有 `data.status` 为 `succeeded` 才宣布完成；从 `data.files` 获取真实绝对路径，检查文件存在后向用户展示或交给后续工具。不要编造输出路径。
-- 需要参数、批量 JSON 格式、配置命令或退出码细节时，阅读 [CLI 完整参考](references/cli.md)。所有当前网页生图参数均可设置；不确定选项时使用 `--help`，不要猜测标志名。
+- Write prompts to UTF-8 files and pass them with `--prompt-file` to avoid shell quoting errors. Use absolute file paths.
+- Generate: `huitu generate --profile main --prompt-file prompt.txt --json`.
+- Edit: `huitu edit --profile main --prompt-file prompt.txt --image input.png --mask mask.png --json`. Repeat `--image` for additional references; the mask is optional.
+- For multiple jobs, create a JSON array and run `huitu batch --input jobs.json --json`. Do not create isolated queues to bypass the shared concurrency limit.
+- Save returned job IDs, then run `huitu jobs wait TASK_ID --wait-timeout 120 --json`. Alternatively, add `--wait` when submitting a short job.
+- Report completion only when `data.status` is `succeeded`. Obtain actual absolute paths from `data.files`, confirm the files exist, then display them or pass them to downstream tools. Never invent output paths.
+- Consult the [CLI reference](references/cli.md) for parameters, batch JSON, configuration commands, and exit codes. All image-generation parameters exposed by the web app are supported. Use `--help` rather than guessing flag names.
 
-## 队列与失败处理
+## Queue and failure handling
 
-- 提交成功仅表示入队。一个任务可生成一至十张图片，但仅占一个并发名额；后台默认同时处理三个任务，生成至下载全过程计入名额。
-- 机器调用使用 `--json`。同时检查退出码、`ok` 和任务 `status`：任务失败仍可能返回 `ok:true`。退出码 `3` 仅表示等待超时，继续等待原编号，不重新提交。
-- 命令被中断或响应丢失时，先通过 `jobs list/show` 查找既有任务。不要把通信失败当成任务未提交。
-- 下载会自动重试两次；仍失败时先检查 `error.phase`。已有响应检查点的 `jobs retry TASK_ID` 会复用生成结果，创建带 `parentId` 的新任务；继续等待新编号。
-- 生成失败或 `interrupted` 不会自动重发。是否显式重试以用户任务授权与预算为准；没有重试授权时报告状态，不循环重试。已计费但响应丢失的生成无法保证去重。
-- `jobs cancel` 取消指定任务；退出等待不会取消任务。不要为单任务错误停止整个共享后台。
-- 环境变量密钥在后台启动时继承；变量变更后仅在确有需要时执行 `worker restart`，它会等待现有活动任务结束。排队任务的参数和凭据已固定，改配置不会更新旧任务；新凭据需要新建任务。
-- 用户未要求修改并发时保留默认值。未配置真实接口时可完成安装与帮助检查，但不声称已验证真实生图。
+- Successful submission means queued, not generated. Each job can request one to ten images but occupies one concurrency slot. The default worker runs three jobs concurrently, counting both generation and download time.
+- Use `--json` for machine calls. Check the exit code, `ok`, and job `status`: a failed job can still appear inside an `ok:true` response. Exit code `3` means the wait timed out; keep waiting on the same ID instead of resubmitting.
+- If a command is interrupted or its response is lost, inspect existing jobs with `jobs list/show` before submitting again. A communication failure does not prove submission failed.
+- Downloads automatically retry twice. If they still fail, inspect `error.phase`. When a response checkpoint exists, `jobs retry TASK_ID` reuses the generated result and creates a new job with `parentId`; wait on the new ID.
+- Failed or `interrupted` generation is not automatically resubmitted. Explicit retries must stay within the user's authorization and budget. Without retry authorization, report the state instead of retrying in a loop. A billed generation with a lost response cannot be guaranteed deduplication.
+- `jobs cancel` cancels the specified job; exiting a wait does not cancel it. Do not stop the shared worker to handle a single failed job.
+- The worker inherits environment-variable credentials when it starts. After changing those variables, use `worker restart` only when needed; it waits for active jobs to finish. Queued jobs already have fixed parameters and credentials. Updated credentials require a new job.
+- Preserve default concurrency unless the user requests a change. Without a configured real endpoint, validate installation and help output but do not claim real image generation was verified.

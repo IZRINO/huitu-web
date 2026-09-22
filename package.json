@@ -3,9 +3,15 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
+  "engines": { "node": "^20.19.0 || >=22.12.0" },
+  "bin": { "huitu": "bin/huitu.mjs" },
   "scripts": {
     "dev": "vite",
-    "build": "tsc -p tsconfig.app.json --noEmit && tsc -p tsconfig.node.json --noEmit && vite build",
+    "build": "tsc -p tsconfig.app.json --noEmit && tsc -p tsconfig.node.json --noEmit && vite build && npm run build:cli",
+    "build:cli": "tsc -p tsconfig.cli.json",
+    "test:cli": "npm run build:cli && node --test tests/cli.test.mjs",
+    "cli": "node bin/huitu.mjs",
+    "prepare": "npm run build:cli",
     "lint": "oxlint",
     "preview": "vite preview",
     "start": "node server.mjs"

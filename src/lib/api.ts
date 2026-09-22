@@ -1,6 +1,6 @@
-import type { Background, Fidelity, GenResult, Moderation, OutputFormat, Quality, Settings } from '../types'
-import { describeHttp } from './errors'
-import { b64ToDataUrl, blobToDataUrl, joinUrl } from './format'
+import type { Background, Fidelity, GenResult, Moderation, OutputFormat, Quality, Settings } from '../types.js'
+import { describeHttp } from './errors.js'
+import { b64ToDataUrl, blobToDataUrl, joinUrl } from './format.js'
 
 export interface GenerateBody {
   prompt: string
@@ -27,18 +27,19 @@ interface StreamHandlers {
   onPartial?: (dataUrl: string) => void
 }
 
-function parseExtra(raw: string): Record<string, string> {
+export function parseExtra(raw: string): Record<string, string> {
   if (!raw.trim()) return {}
   const obj = JSON.parse(raw) as unknown
   if (!obj || typeof obj !== 'object' || Array.isArray(obj)) throw new Error('额外请求头必须是 JSON 对象')
   const out: Record<string, string> = {}
   for (const [k, v] of Object.entries(obj as Record<string, unknown>)) {
-    if (typeof v === 'string') out[k] = v
+    if (typeof v !== 'string') throw new Error('Extra header values must be strings')
+    out[k] = v
   }
   return out
 }
 
-async function relayFetch(
+export async function relayFetch(
   settings: Settings,
   target: string,
   init: RequestInit,
@@ -49,7 +50,7 @@ async function relayFetch(
     headers.set('x-relay-url', target)
     if (settings.organization) headers.set('x-relay-organization', settings.organization)
     if (Object.keys(extra).length) headers.set('x-relay-headers', JSON.stringify(extra))
-    return fetch('/api/relay', { ...init, headers })
+    return fetch(settings.relayUrl || '/api/relay', { ...init, headers })
   }
   const headers = new Headers(init.headers)
   for (const [k, v] of Object.entries(extra)) headers.set(k, v)
@@ -57,20 +58,20 @@ async function relayFetch(
   return fetch(target, { ...init, headers })
 }
 
-function authHeaders(apiKey: string, json = false): Headers {
+export function authHeaders(apiKey: string, json = false): Headers {
   const h = new Headers()
   if (json) h.set('Content-Type', 'application/json')
   if (apiKey) h.set('Authorization', `Bearer ${apiKey}`)
   return h
 }
 
-interface ImagePayload {
+export interface ImagePayload {
   b64_json?: string
   url?: string
   result?: string
 }
 
-interface ImagesResponse {
+export interface ImagesResponse {
   data?: ImagePayload[]
   usage?: GenResult['usage']
   size?: string
@@ -103,7 +104,8 @@ async function readSse(res: Response, format: string, onPartial?: (dataUrl: stri
   const reader = res.body.getReader()
   const decoder = new TextDecoder()
   let buf = ''
-  let last: ImagesResponse | null = null
+  const result: ImagesResponse = { data: [] }
+  const completed = new Map<string, ImagePayload>()
   const pushEvent = async (block: string) => {
     const lines = block.split('\n')
     let event = 'message'
@@ -113,45 +115,52 @@ async function readSse(res: Response, format: string, onPartial?: (dataUrl: stri
       else if (line.startsWith('data:')) dataLines.push(line.slice(5).trim())
     }
     if (!dataLines.length) return
-    const raw = dataLines.join('')
+    const raw = dataLines.join('\n')
     if (raw === '[DONE]') return
     let json: Record<string, unknown>
     try {
       json = JSON.parse(raw) as Record<string, unknown>
     } catch {
-      return
+      throw new Error('Invalid JSON in image stream')
     }
     const b64 = (json.b64_json ?? json.result) as string | undefined
+    if (typeof json.type === 'string') event = json.type
+    if (json.error) {
+      const err = json.error as { message?: string }
+      throw new Error(err.message || 'Image stream failed')
+    }
+    if (json.usage) result.usage = json.usage as ImagesResponse['usage']
+    for (const key of ['size', 'quality', 'background', 'output_format'] as const) {
+      if (typeof json[key] === 'string') result[key] = json[key]
+    }
     if (typeof b64 === 'string' && onPartial && event.includes('partial')) {
       onPartial(b64ToDataUrl(b64, format))
     }
-    if (json.data || json.usage || event.includes('completed') || json.b64_json) {
-      if (json.data) last = json as unknown as ImagesResponse
-      else if (typeof b64 === 'string') {
-        last = { data: [{ b64_json: b64 }], usage: json.usage as ImagesResponse['usage'] }
-      }
-    }
-    if (json.error) {
-      const err = json.error as { message?: string }
-      throw new Error(err.message || '流式生成失败')
+    if (event.includes('partial')) return
+    if (Array.isArray(json.data)) result.data = json.data as ImagePayload[]
+    else if (typeof b64 === 'string') {
+      const index = json.output_index ?? json.image_index
+      completed.set(index == null ? b64 : String(index), { b64_json: b64 })
     }
   }
   while (true) {
     const { done, value } = await reader.read()
     if (done) break
     buf += decoder.decode(value, { stream: true })
-    const parts = buf.split('\n\n')
+    const parts = buf.split(/\r?\n\r?\n/)
     buf = parts.pop() ?? ''
     for (const part of parts) {
       if (part.trim()) await pushEvent(part)
     }
   }
+  buf += decoder.decode()
   if (buf.trim()) await pushEvent(buf)
-  if (!last?.data?.length) throw new Error('流结束但没有成片')
-  return last
+  if (!result.data?.length) result.data = [...completed.values()]
+  if (!result.data.length) throw new Error('流结束但没有成片')
+  return result
 }
 
-async function parseResponse(res: Response, format: string, stream: boolean, onPartial?: (dataUrl: string) => void): Promise<GenResult> {
+export async function parseResponse(res: Response, format: string, stream: boolean, onPartial?: (dataUrl: string) => void): Promise<ImagesResponse> {
   const ct = res.headers.get('content-type') ?? ''
   if (!res.ok) {
     const text = await res.text()
@@ -159,17 +168,15 @@ async function parseResponse(res: Response, format: string, stream: boolean, onP
   }
   if (stream && (ct.includes('text/event-stream') || ct.includes('text/plain'))) {
     const payload = await readSse(res, format, onPartial)
-    return {
-      images: await collectImages(payload.data ?? [], format),
-      usage: payload.usage,
-      size: payload.size,
-      quality: payload.quality,
-      background: payload.background,
-      outputFormat: payload.output_format,
-    }
+    return payload
   }
   const payload = (await res.json()) as ImagesResponse
   if (payload.error?.message) throw new Error(payload.error.message)
+  if (!Array.isArray(payload.data) || !payload.data.length) throw new Error('No images returned')
+  return payload
+}
+
+async function browserResult(payload: ImagesResponse, format: string): Promise<GenResult> {
   return {
     images: await collectImages(payload.data ?? [], format),
     usage: payload.usage,
@@ -180,11 +187,11 @@ async function parseResponse(res: Response, format: string, stream: boolean, onP
   }
 }
 
-export async function generateImage(
+export async function requestImages(
   settings: Settings,
-  body: GenerateBody,
+  body: GenerateBody | EditBody,
   handlers: StreamHandlers,
-): Promise<GenResult> {
+): Promise<ImagesResponse> {
   if (!settings.baseUrl.trim()) throw new Error('先填中转站地址')
   if (!settings.apiKey.trim()) throw new Error('先填密钥')
   const payload: Record<string, unknown> = {
@@ -200,13 +207,27 @@ export async function generateImage(
   }
   if (body.output_format !== 'png') payload.output_compression = body.output_compression
   if (body.stream) payload.partial_images = body.partial_images ?? 2
-  const res = await relayFetch(settings, joinUrl(settings.baseUrl, '/images/generations'), {
+  const editing = 'images' in body
+  let form: FormData | undefined
+  if (editing) {
+    if (!body.images.length) throw new Error('At least one reference image is required')
+    form = new FormData()
+    for (const [key, value] of Object.entries(payload)) form.append(key, String(value))
+    form.append('input_fidelity', body.input_fidelity)
+    for (const file of body.images) form.append('image', file)
+    if (body.mask) form.append('mask', body.mask, 'mask.png')
+  }
+  const res = await relayFetch(settings, joinUrl(settings.baseUrl, editing ? '/images/edits' : '/images/generations'), {
     method: 'POST',
-    headers: authHeaders(settings.apiKey, true),
-    body: JSON.stringify(payload),
+    headers: authHeaders(settings.apiKey, !editing),
+    body: form ?? JSON.stringify(payload),
     signal: handlers.signal,
   })
   return parseResponse(res, body.output_format, body.stream, handlers.onPartial)
+}
+
+export async function generateImage(settings: Settings, body: GenerateBody, handlers: StreamHandlers): Promise<GenResult> {
+  return browserResult(await requestImages(settings, body, handlers), body.output_format)
 }
 
 export async function editImage(
@@ -214,31 +235,7 @@ export async function editImage(
   body: EditBody,
   handlers: StreamHandlers,
 ): Promise<GenResult> {
-  if (!settings.baseUrl.trim()) throw new Error('先填中转站地址')
-  if (!settings.apiKey.trim()) throw new Error('先填密钥')
-  if (!body.images.length) throw new Error('改图至少要一张底图')
-  const form = new FormData()
-  form.append('model', body.model)
-  form.append('prompt', body.prompt)
-  form.append('n', String(body.n))
-  form.append('size', body.size)
-  form.append('quality', body.quality)
-  form.append('background', body.background)
-  form.append('output_format', body.output_format)
-  form.append('moderation', body.moderation)
-  form.append('input_fidelity', body.input_fidelity)
-  form.append('stream', String(body.stream))
-  if (body.output_format !== 'png') form.append('output_compression', String(body.output_compression))
-  if (body.stream) form.append('partial_images', String(body.partial_images ?? 2))
-  for (const file of body.images) form.append('image', file)
-  if (body.mask) form.append('mask', body.mask, 'mask.png')
-  const res = await relayFetch(settings, joinUrl(settings.baseUrl, '/images/edits'), {
-    method: 'POST',
-    headers: authHeaders(settings.apiKey, false),
-    body: form,
-    signal: handlers.signal,
-  })
-  return parseResponse(res, body.output_format, body.stream, handlers.onPartial)
+  return browserResult(await requestImages(settings, body, handlers), body.output_format)
 }
 
 export async function testRelay(settings: Settings): Promise<string> {

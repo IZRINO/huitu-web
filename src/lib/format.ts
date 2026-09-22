@@ -1,4 +1,4 @@
-import type { Usage } from '../types'
+import type { Usage } from '../types.js'
 
 export function uid(): string {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`

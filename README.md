@@ -34,6 +34,22 @@
 
 ## 使用
 
+### 命令行与 Agent 自动生图
+
+已提供独立 `huitu` CLI：支持网页全部参数、多组模型配置、持久共享队列（默认三个并发）、自动下载。完整安装、参数表和 agent 调用契约见 [CLI 文档](docs/cli.md)。
+
+```powershell
+npm install
+npm link
+huitu config set --output-dir "D:\images" --concurrency 3
+huitu profile set main --base-url "https://你的中转/v1" --model "你的模型" --api-key-env HUITU_API_KEY
+huitu generate --profile main --prompt-file prompt.txt --wait --json
+```
+
+调用前设置密钥环境变量；若后台已启动，修改环境变量后执行 `huitu worker restart`。
+
+### 网页
+
 ```bash
 npm install
 npm run dev

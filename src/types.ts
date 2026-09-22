@@ -11,6 +11,7 @@ export interface Settings {
   apiKey: string
   model: string
   useProxy: boolean
+  relayUrl?: string
   extraHeaders: string
   organization: string
 }

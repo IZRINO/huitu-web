@@ -42,7 +42,9 @@
 npx skills add IZRINO/huitu-web --skill huitu-image
 ```
 
-技能入口：[skills/huitu-image/SKILL.md](skills/huitu-image/SKILL.md)。安装器只安装技能；首次调用按技能内说明安装 CLI、配置模型与密钥。也可将整个 `skills/huitu-image` 目录复制到 agent 的技能目录，所有参考文档均包含在包内。
+技能入口：[skills/huitu-image/SKILL.md](skills/huitu-image/SKILL.md)。包内包含全部已编译 CLI 文件；本机有 Node.js 即可直接执行 `node <技能目录>/scripts/huitu.mjs --help`，无需另行安装依赖或编译。也可将整个 `skills/huitu-image` 目录复制到 agent 的技能目录。
+
+维护者修改 CLI 源码后运行 `npm run build:skill`，将编译文件一并提交；`npm run test:skill` 检查产物同步，并在仓库外临时目录运行整套 CLI 集成测试。
 
 已提供独立 `huitu` CLI：支持网页全部参数、多组模型配置、持久共享队列（默认三个并发）、自动下载。完整安装、参数表和 agent 调用契约见 [CLI 文档](docs/cli.md)。
 

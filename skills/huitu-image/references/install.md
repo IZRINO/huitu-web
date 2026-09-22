@@ -1,69 +1,58 @@
-# 安装技能与运行工具
+# 安装后直接调用
 
-技能包与运行工具是两层：安装技能提供操作知识，安装 CLI 提供实际执行能力。仅复制本技能目录不会安装 CLI 或配置凭据。
+技能包包含全部已编译 JavaScript 文件及独立 ESM 模块声明。运行时只使用 Node.js 内置模块；无需 Git、npm、项目源码、全局命令或额外依赖。唯一运行要求是本机有 Node.js 20.19+（20 系列）或 22.12+。
 
 ## 安装技能
-
-仓库：<https://github.com/IZRINO/huitu-web>，技能目录：`skills/huitu-image`。
-
-支持 Agent Skills 的安装器可直接安装此目录。例如：
 
 ```sh
 npx skills add IZRINO/huitu-web --skill huitu-image
 ```
 
-也可把整个 `skills/huitu-image` 目录（包括 `agents` 与 `references`）复制到目标 agent 的技能目录。Codex 使用 `$CODEX_HOME/skills/huitu-image`，未设置 `CODEX_HOME` 时使用 `~/.codex/skills/huitu-image`。其他 agent 使用其支持的技能目录。不要只复制 `SKILL.md`。安装后按宿主要求重新加载技能或开启新会话。
+上述命令是可选的技能安装方式，安装器本身使用 npm。没有 npm 时，直接复制或下载完整 `skills/huitu-image` 文件夹到 agent 的技能目录即可，运行工具仍不依赖 npm。必须保留 `scripts/runtime` 全部文件及其中的 `package.json`。
 
-## 运行工具：复用优先
+Codex 可使用 `$CODEX_HOME/skills/huitu-image`，未设置时使用 `~/.codex/skills/huitu-image`；其他安装器可能使用项目 `.agents/skills/huitu-image`。以宿主实际加载的 `SKILL.md` 路径确定技能目录，不假定某个固定路径。安装后按宿主要求重新加载技能或开启新会话。
 
-先尝试 `huitu --help`。已有可用 CLI 时无需再次克隆。当前仓库有 `bin/huitu.mjs` 时可直接复用，但先确认已构建 `dist-cli/cli/main.js`。
+## 调用入口
 
-需要 Git、npm，以及 Node.js 20.19+（20 系列）或 22.12+。依赖中含编译器，安装时保留开发依赖。仓库未发布 npm 包，不使用 `npm install -g huitu-web` 猜测安装来源。
+相对于技能目录，入口是 `scripts/huitu.mjs`。无需切换到技能目录；所有任务文件路径建议使用绝对路径。参考文档中 `huitu` 均为此入口的简写。
 
-## 全新运行环境
-
-选择用户缓存目录安装运行工具，不把它放进业务项目。以下默认路径仅用于首次安装；目录已存在时先检查内容和远程地址，复用正确仓库，不覆盖或删除已有目录。
+以下示例采用用户级 Codex 默认位置；实际目录不同时替换变量值。
 
 PowerShell：
 
 ```powershell
-$huituRuntime = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'huitu-cli'
-git clone --depth 1 https://github.com/IZRINO/huitu-web.git $huituRuntime
-Set-Location $huituRuntime
-npm ci --ignore-scripts --include=dev
-node node_modules/typescript/bin/tsc -p tsconfig.cli.json
-node bin/huitu.mjs --help
+$huituSkillDir = Join-Path $env:USERPROFILE '.codex/skills/huitu-image'
+$huituEntry = Join-Path $huituSkillDir 'scripts/huitu.mjs'
+node $huituEntry --help
+node $huituEntry profile list --json
 ```
 
 POSIX shell：
 
 ```sh
-huitu_runtime="${XDG_DATA_HOME:-$HOME/.local/share}/huitu-cli"
-mkdir -p "$(dirname "$huitu_runtime")"
-git clone --depth 1 https://github.com/IZRINO/huitu-web.git "$huitu_runtime"
-cd "$huitu_runtime"
-npm ci --ignore-scripts --include=dev
-node node_modules/typescript/bin/tsc -p tsconfig.cli.json
-node bin/huitu.mjs --help
+huitu_skill_dir="${CODEX_HOME:-$HOME/.codex}/skills/huitu-image"
+huitu_entry="$huitu_skill_dir/scripts/huitu.mjs"
+node "$huitu_entry" --help
+node "$huitu_entry" profile list --json
 ```
 
-逐步检查退出码，失败停止后续步骤。帮助输出必须包含 `generate`、`batch`、`jobs`；不能仅凭退出码判断安装成功。`--ignore-scripts` 后显式调用编译器，避免安装生命周期或 shell 包装器静默跳过构建。
+帮助输出必须包含 `generate`、`batch`、`jobs`。若缺少编译文件，重新安装完整技能包；不要改成克隆源码并安装依赖。缺少 Node.js 时说明运行时要求，不声称已可执行。
 
-后续从用户项目调用 `node` 加运行工具 `bin/huitu.mjs` 的绝对路径即可；无需全局安装。用户需要全局命令时可在运行工具目录执行 `npm link --ignore-scripts`，随后验证 `huitu --help`。包装器有问题时保留绝对路径调用。
+## 配置模型与生成
 
-## 首次配置
+复用已有 profile；仅在未配置时新增。下面的接口和模型是示例，使用用户给定值。先在当前 shell 设置用户已有的 `HUITU_API_KEY` 环境变量；不在回复中输出密钥。
 
-下列示例中的接口地址、模型名、配置名和路径由用户实际选择替换，不把示例值当作已配置服务。密钥从已有环境变量或用户本地配置读取。示例假定位于运行工具目录：
-
-```sh
-node bin/huitu.mjs profile set main --base-url https://example.com/v1 --model user-selected-model --api-key-env HUITU_API_KEY
-node bin/huitu.mjs profile use main
-node bin/huitu.mjs config set --output-dir ./images --concurrency 3
-node bin/huitu.mjs models probe --profile main --json
+```powershell
+node $huituEntry profile set main --base-url https://example.com/v1 --model user-selected-model --api-key-env HUITU_API_KEY
+node $huituEntry profile use main
+node $huituEntry config set --output-dir "D:/images" --concurrency 3
+node $huituEntry generate --profile main --prompt-file "D:/prompts/image.txt" --wait --json
 ```
 
-在首次运行配置命令前设置 `HUITU_API_KEY`；后台已经启动时，更新环境变量后执行 `worker restart`。`models probe` 仅检查连接，模型接口可能不提供列表；它不是实际生图验证。
+POSIX shell 使用 `node "$huitu_entry"` 替代 `node $huituEntry`。后台已经启动时，修改环境变量需执行 `worker restart`；队列中的旧任务继续使用原凭据快照。
 
-需要同步网页参数时导入网页导出的 JSON：`config import --input huitu-config.json --profile main`。密钥不会从导入文件覆盖本地值，代理默认改为直连。
+默认配置和队列位于 `~/.huitu`，图片默认位于 `~/Pictures/huitu`，不会写入技能目录。可以通过 `HUITU_HOME`、`--home` 和 `--output-dir` 调整。多个 agent 使用同一个数据目录才共享并发上限。
 
-完整参数和真实生图调用见 [CLI 参考](cli.md)。
+升级技能前用旧入口执行 `worker stop`，等待 `worker status` 显示后台已退出再替换技能文件；重新调用会启动新版后台并恢复队列。不要在仍有后台依赖当前技能路径时删除或移动目录。
+
+全部生成参数、批量 JSON 和状态处理见 [CLI 参考](cli.md)。

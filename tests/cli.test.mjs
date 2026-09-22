@@ -1,18 +1,26 @@
-import test from 'node:test'
+import test, { after } from 'node:test'
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
 import { spawn } from 'node:child_process'
 import { mkdtemp, readFile, writeFile, readdir, rm } from 'node:fs/promises'
+import { cpSync, mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
-import { parseResponse } from '../dist-cli/src/lib/api.js'
+import { pathToFileURL } from 'node:url'
 
 const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aWZkAAAAASUVORK5CYII=', 'base64')
-const bin = resolve('bin/huitu.mjs')
+const skillCopy = process.env.HUITU_TEST_SKILL === '1' ? mkdtempSync(join(tmpdir(), 'huitu-portable-')) : undefined
+if (skillCopy) {
+  cpSync(resolve('skills/huitu-image'), join(skillCopy, 'skill'), { recursive: true })
+  after(() => rm(skillCopy, { recursive: true, force: true }))
+}
+const bin = skillCopy ? join(skillCopy, 'skill/scripts/huitu.mjs') : resolve('bin/huitu.mjs')
+const apiPath = skillCopy ? join(skillCopy, 'skill/scripts/runtime/src/lib/api.js') : resolve('dist-cli/src/lib/api.js')
+const { parseResponse } = await import(pathToFileURL(apiPath).href)
 function cli(home, args, stdin = '', env = {}) {
   return new Promise((resolvePromise, reject) => {
-    const child = spawn(process.execPath, [bin, '--home', home, '--json', ...args], { windowsHide: true, env: { ...process.env, ...env }, stdio: ['pipe','pipe','pipe'] })
+    const child = spawn(process.execPath, [bin, '--home', home, '--json', ...args], { cwd: skillCopy, windowsHide: true, env: { ...process.env, NODE_PATH: '', ...env }, stdio: ['pipe','pipe','pipe'] })
     let stdout = '', stderr = ''
     const timer = setTimeout(() => { child.kill(); reject(new Error(`CLI timeout: ${args.join(' ')}\n${stderr}`)) }, 45000)
     child.on('error', reject)

@@ -4,16 +4,13 @@
 
 ## 安装与快速开始
 
-运行环境：Node.js 20.19+ 或 22.12+。在仓库目录执行：
+本技能已包含编译后的 CLI，只需 Node.js 20.19+（20 系列）或 22.12+。按 [直接运行说明](install.md) 找到当前技能的 `scripts/huitu.mjs`，执行：
 
-```powershell
-npm install
-npm run build:cli
-npm link
-huitu --help
+```sh
+node /absolute/path/to/huitu-image/scripts/huitu.mjs --help
 ```
 
-也可不安装全局命令，直接使用 `node bin/huitu.mjs` 或 `npm run cli --`。修改源码后重新执行 `npm run build:cli`。
+下文所有 `huitu` 均为 `node` 加此入口绝对路径的简写，不要求全局命令。无需安装项目依赖、克隆仓库或编译。
 
 ```powershell
 $env:HUITU_API_KEY = '你的密钥'
@@ -178,9 +175,11 @@ huitu batch --input jobs.json --wait --json
 
 批量输入路径相对于调用进程当前目录解析。单个参数错误阻止本批入队。建议 agent 一次提交批次，保存任务编号，随后调用 `jobs wait`，最终根据 `files` 读取图片。输出为绝对路径。
 
-## 开发验证
+## 维护者验证（仅源码仓库）
 
 ```powershell
+npm run build:skill
+npm run test:skill
 npm run test:cli
 npm run lint
 npm run build

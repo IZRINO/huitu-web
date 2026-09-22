@@ -9,6 +9,8 @@
     "dev": "vite",
     "build": "tsc -p tsconfig.app.json --noEmit && tsc -p tsconfig.node.json --noEmit && vite build && npm run build:cli",
     "build:cli": "tsc -p tsconfig.cli.json",
+    "build:skill": "node scripts/build-skill.mjs",
+    "test:skill": "node scripts/test-skill.mjs",
     "test:cli": "npm run build:cli && node --test tests/cli.test.mjs",
     "cli": "node bin/huitu.mjs",
     "prepare": "npm run build:cli",

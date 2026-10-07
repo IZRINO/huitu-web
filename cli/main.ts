@@ -127,8 +127,17 @@ async function main() {
     let jobs = initial
     while (jobs.some(j => !terminal(j.status))) {
       if (Date.now() >= deadline) { output({ timedOut: true, jobs }); process.exitCode = 3; return }
-      await delay(250)
-      jobs = await Promise.all(jobs.map(job => call<Job>('jobs.show', { id: job.id })))
+      await delay(Math.min(250, deadline - Date.now()))
+      if (Date.now() >= deadline) { output({ timedOut: true, jobs }); process.exitCode = 3; return }
+      const args = { ids: jobs.filter(job => !terminal(job.status)).map(job => job.id) }
+      let updated: Job[]
+      try { updated = await rpc<Job[]>(home, 'jobs.showMany', args) }
+      catch (error) {
+        if (error instanceof CliError && error.code !== 'WORKER_STARTING') throw error
+        updated = await call<Job[]>('jobs.showMany', args)
+      }
+      const byId = new Map(updated.map(job => [job.id, job]))
+      jobs = jobs.map(job => byId.get(job.id) ?? job)
     }
     output(jobs.length === 1 ? jobs[0] : jobs)
     if (jobs.some(j => j.status !== 'succeeded')) process.exitCode = 1

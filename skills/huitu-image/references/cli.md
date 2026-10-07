@@ -50,6 +50,8 @@ huitu models list --profile fast
 
 Precedence: built-in defaults, global `config set`, named `profile set`, then per-job arguments. `outputDir` follows the same order; concurrency and timeouts are global. Changing concurrency affects subsequent dispatch immediately; reducing it does not cancel active jobs. Parameters, timeouts, output paths, and credentials are fixed when a job is queued. Credentials are saved separately in a local file with restricted permissions, so profile edits cannot send a new key to an old job's endpoint. Key changes apply only to new jobs; explicit retries retain the original snapshot. Profiles with unfinished jobs cannot be removed.
 
+Model listing and probing resolve only connection settings and credentials; image dimensions do not affect them. Slow probes run independently of the mutation queue, allowing status queries and cancellation to continue.
+
 | CLI argument | JSON field | Default / range |
 | --- | --- | --- |
 | `--base-url` | `settings.baseUrl` | `https://api.openai.com/v1` |
@@ -121,6 +123,10 @@ States: `queued → running → downloading → succeeded`; other terminal state
 
 Generation failures are not automatically retried. A crash during generation without a saved response checkpoint marks the job `interrupted`, requiring explicit `jobs retry`. Downloads with saved responses resume automatically. Failed downloads retry twice, then preserve completed files if still unsuccessful. Explicit retries create a new job with `parentId`; if a response checkpoint exists, they reuse it without requesting generation again. An expired result URL may prevent further downloading and require a new generation job.
 
+Retries retain the original endpoint, model, credentials, image parameters and timeouts after profile edits or removal. Generation retries need the saved credentials and input snapshots. Download retries with a response checkpoint do not need the original references or credential file; they copy any healthy completed images and retrieve only missing results.
+
+At startup, each persisted job is parsed and validated independently. Damaged records are skipped with their original files preserved; healthy jobs still load and resume. `worker status --json` returns their IDs in `data.invalidJobs`; queries or retries for those IDs return `JOB_RECORD_INVALID`. Worker logs name the skipped IDs without printing raw record contents. Inspect and repair records locally, then restart the worker to reload them. Do not automatically resubmit damaged records whose generation outcome is unknown.
+
 Data defaults to `~/.huitu`: configuration, job records, credential snapshots, input snapshots, response checkpoints, and worker logs. Use `--home` or `HUITU_HOME` to isolate another queue. CLI and browser history are separate. Local IPC uses a named pipe or Unix socket. The worker also holds a loopback TCP port derived from the data-directory hash as an operating-system-managed singleton lock; no application service is exposed on that port. A port conflict prevents startup and logs the port number; a different `HUITU_HOME` can avoid the conflict.
 
 ## Agent contract
@@ -141,6 +147,34 @@ Invoke through a normal shell; no MCP service is required. Use `--json` for mach
 ```
 
 Command errors return `ok:false,error:{code,message}`. A failed job can still be returned by a successful command as `ok:true,data.status:"failed"`, with job `error:{code,message,phase}`. Check both exit code and job state.
+
+Return shapes depend on the operation:
+
+| Operation | `data` shape | Handling |
+| --- | --- | --- |
+| Single submission, show, retry or completed single wait | Job object | Check `status`, then read `files` |
+| Batch submission without `--wait` | Array of jobs, including one-job batches | Save every `id`; submission only confirms queuing |
+| Completed batch wait with multiple jobs | Array of jobs in submission order | Check each `status` and retain successful `files` |
+| Completed one-job batch wait | Job object | Same handling as a single wait |
+| Any wait timeout, exit `3` | `{ "timedOut": true, "jobs": [...] }` | Latest known states for all requested jobs; keep IDs and continue waiting on unfinished jobs |
+
+For example, a timed-out wait may return:
+
+```json
+{
+  "schemaVersion": 1,
+  "ok": true,
+  "data": {
+    "timedOut": true,
+    "jobs": [
+      { "id": "first-job-id", "status": "succeeded", "files": ["D:\\images\\first-job-id\\01.png"] },
+      { "id": "second-job-id", "status": "running", "files": [] }
+    ]
+  }
+}
+```
+
+A completed batch wait exits `1` if any job is failed, cancelled or interrupted, while still returning all job results. Report per-job failures and preserve successful files. Polling combines unfinished IDs into one IPC request per round; already completed jobs retain their last result without further queries. If the worker disconnects, the wait attempts to restore it and query the same IDs.
 
 | Exit code | Meaning |
 | --- | --- |

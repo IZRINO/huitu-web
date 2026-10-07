@@ -2,7 +2,8 @@ import test, { after } from 'node:test'
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
 import { spawn } from 'node:child_process'
-import { mkdtemp, readFile, writeFile, readdir, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, writeFile, readdir, rm } from 'node:fs/promises'
+import { randomUUID } from 'node:crypto'
 import { cpSync, mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -16,8 +17,11 @@ if (skillCopy) {
   after(() => rm(skillCopy, { recursive: true, force: true }))
 }
 const bin = skillCopy ? join(skillCopy, 'skill/scripts/huitu.mjs') : resolve('bin/huitu.mjs')
-const apiPath = skillCopy ? join(skillCopy, 'skill/scripts/runtime/src/lib/api.js') : resolve('dist-cli/src/lib/api.js')
+const runtimeRoot = skillCopy ? join(skillCopy, 'skill/scripts/runtime') : resolve('dist-cli')
+const apiPath = join(runtimeRoot, 'src/lib/api.js')
 const { parseResponse } = await import(pathToFileURL(apiPath).href)
+const { endpoint, loadJobs } = await import(pathToFileURL(join(runtimeRoot, 'cli/store.js')).href)
+const { defaultSettings, defaultParams } = await import(pathToFileURL(join(runtimeRoot, 'src/lib/defaults.js')).href)
 function cli(home, args, stdin = '', env = {}) {
   return new Promise((resolvePromise, reject) => {
     const child = spawn(process.execPath, [bin, '--home', home, '--json', ...args], { cwd: skillCopy, windowsHide: true, env: { ...process.env, NODE_PATH: '', ...env }, stdio: ['pipe','pipe','pipe'] })
@@ -60,13 +64,68 @@ test('SSE: split CRLF, multiline JSON, partial exclusion, multiple final images'
   await assert.rejects(parseResponse(new Response('data: {"type":"image.partial","b64_json":"x"}\n\n', { headers: { 'Content-Type':'text/event-stream' } }), 'png', true), /没有成片/)
 })
 
+test('damaged job records are isolated and preserved', async t => {
+  const home = await mkdtemp(join(tmpdir(), 'huitu-damaged-jobs-'))
+  t.after(() => rm(home, { recursive:true, force:true }))
+  const id = randomUUID()
+  const healthy = { id, sequence:1, status:'succeeded', mode:'generate', prompt:'healthy', profile:'removed',
+    settings:{ ...defaultSettings(), useProxy:false }, params:defaultParams(), size:'1024x1024',
+    images:[], outputDir:join(home,'output',id), generationTimeout:600, downloadTimeout:60,
+    files:[], createdAt:new Date().toISOString() }
+  await mkdir(join(home,'jobs',id), { recursive:true })
+  await writeFile(join(home,'jobs',id,'job.json'), JSON.stringify(healthy))
+  const invalid = new Map()
+  for (const value of ['{invalid', 'null', '{}', { ...healthy, sequence:'bad' }, { ...healthy, status:'unknown' },
+    { ...healthy, params:{} }, { ...healthy, files:null }, { ...healthy, settings:null }, { ...healthy, id:'mismatched' }]) {
+    const badId = randomUUID()
+    const raw = typeof value === 'string' ? value : JSON.stringify({ ...value, id:value.id === 'mismatched' ? value.id : badId })
+    invalid.set(badId, raw)
+    await mkdir(join(home,'jobs',badId), { recursive:true })
+    await writeFile(join(home,'jobs',badId,'job.json'), raw)
+  }
+  const reported = []
+  const jobs = await loadJobs(home, badId => reported.push(badId))
+  assert.deepEqual(jobs, [healthy])
+  assert.deepEqual(reported.sort(), [...invalid.keys()].sort())
+  for (const [badId, raw] of invalid) assert.equal(await readFile(join(home,'jobs',badId,'job.json'),'utf8'), raw)
+})
+
+test('batch waits poll unfinished jobs in one request without repeated status checks', async t => {
+  const home = await mkdtemp(join(tmpdir(), 'huitu-poll-test-'))
+  const commands = [], queried = []
+  let polls = 0
+  const jobs = [{id:'short',status:'queued'}, {id:'long',status:'queued'}]
+  const server = createServer(async (req, res) => {
+    const chunks = []; for await (const chunk of req) chunks.push(chunk)
+    const { command, args } = JSON.parse(Buffer.concat(chunks).toString())
+    commands.push(command)
+    let data
+    if (command === 'status') data = {pid:process.pid}
+    else if (command === 'batch') data = jobs
+    else if (command === 'jobs.showMany') {
+      queried.push(args.ids); polls++
+      data = args.ids.map(id => ({ id, status:id === 'short' || polls > 1 ? 'succeeded' : 'queued' }))
+    } else if (command === 'jobs.show') data = {id:args.id,status:'succeeded'}
+    else { res.end(JSON.stringify({ok:false,error:{message:'Unexpected command',exitCode:1}})); return }
+    res.end(JSON.stringify({schemaVersion:1,ok:true,data}))
+  })
+  await new Promise(resolvePromise => server.listen(endpoint(home), resolvePromise))
+  await writeFile(join(home,'runtime.json'), JSON.stringify({token:'test-token'}))
+  t.after(async () => { await new Promise(resolvePromise => server.close(resolvePromise)); await rm(home, {recursive:true,force:true}) })
+  const result = await ok(home,['batch','--input','-','--wait'],JSON.stringify([{mode:'generate',prompt:'short'},{mode:'generate',prompt:'long'}]))
+  assert.deepEqual(result, [{id:'short',status:'succeeded'}, {id:'long',status:'succeeded'}])
+  assert.deepEqual(commands, ['status','batch','jobs.showMany','jobs.showMany'])
+  assert.deepEqual(queried, [['short','long'],['long']])
+})
+
 test('CLI end-to-end: configuration, shared queue, editing, downloads and recovery', { timeout: 180000 }, async t => {
   const root = await mkdtemp(join(tmpdir(), 'huitu-test-'))
   const home = join(root, '配置 空间'), out = join(root, '图片 空间')
   const requests = [], sockets = new Set()
-  let running = 0, peak = 0, urlHits = 0, failDownloads = true, onceHits = 0
+  let running = 0, peak = 0, urlHits = 0, failDownloads = true, onceHits = 0, modelRequests = 0
+  let modelGate
   const server = createServer(async (req, res) => {
-    if (req.url === '/v1/models') { res.setHeader('Content-Type','application/json'); res.end(JSON.stringify({ data:[{ id:'mock-image' }] })); return }
+    if (req.url === '/v1/models') { modelRequests++; await modelGate; res.setHeader('Content-Type','application/json'); res.end(JSON.stringify({ data:[{ id:'mock-image' }] })); return }
     if (req.url === '/download') {
       urlHits++
       if (failDownloads) { res.writeHead(503); res.end('unavailable'); return }
@@ -224,6 +283,7 @@ test('CLI end-to-end: configuration, shared queue, editing, downloads and recove
     const first = await ok(home,['generate','--prompt','hold cancel'])
     const second = await ok(home,['generate','--prompt','never sent'])
     const wait = await cli(home,['jobs','wait',first.id,'--wait-timeout','0.1']); assert.equal(wait.code,3)
+    assert.equal(wait.result.data.timedOut,true); assert.equal(wait.result.data.jobs[0].id,first.id)
     assert.equal((await ok(home,['jobs','cancel',second.id])).status,'cancelled')
     await ok(home,['jobs','cancel',first.id]); await until(async () => (await ok(home,['worker','status'])).active === 0)
     assert.equal(requests.some(r => r.input.prompt === 'never sent'),false)
@@ -248,12 +308,15 @@ test('CLI end-to-end: configuration, shared queue, editing, downloads and recove
     const first = await ok(home,['generate','--prompt','hold crash'])
     await until(() => requests.some(r => r.input.prompt === 'hold crash'))
     const queued = await ok(home,['generate','--prompt','after crash'])
+    const waiter = ok(home,['jobs','wait',queued.id])
+    await delay(500)
     const status = await ok(home,['worker','status']); process.kill(status.pid,'SIGKILL')
     await delay(200)
     const recovered = await Promise.all(Array.from({ length:8 }, () => ok(home,['worker','start'])))
     assert.equal(new Set(recovered.map(s => s.pid)).size, 1)
     assert.equal((await ok(home,['jobs','show',first.id])).status,'interrupted')
     assert.equal((await ok(home,['jobs','wait',queued.id])).status,'succeeded')
+    assert.equal((await waiter).status,'succeeded')
     assert.equal(requests.filter(r => r.input.prompt === 'hold crash').length,1)
     const retry = await ok(home,['jobs','retry',first.id,'--wait']); assert.equal(retry.parentId,first.id)
     assert.equal(requests.filter(r => r.input.prompt === 'hold crash').length,2)
@@ -263,5 +326,95 @@ test('CLI end-to-end: configuration, shared queue, editing, downloads and recove
     await ok(home,['worker','restart'],undefined,{ HUITU_TEST_KEY:'env-secret' })
     await ok(home,['generate','--profile','env','--prompt','env','--wait'])
     assert.equal(requests.at(-1).headers.authorization,'Bearer env-secret')
+  })
+  await t.test('models ignores image size but generation still validates it', async () => {
+    await ok(home,['profile','set','invalid-size','--base-url',base,'--api-key','secret-key','--size','100x100'])
+    assert.deepEqual((await ok(home,['models','probe','--profile','invalid-size'])).models, ['mock-image'])
+    assert.equal((await cli(home,['generate','--profile','invalid-size','--prompt','invalid-size'])).code, 2)
+  })
+  await t.test('slow model probes do not block status or cancellation', async () => {
+    const job = await ok(home,['generate','--prompt','hold during probe'])
+    await until(() => requests.some(r => r.input.prompt === 'hold during probe'))
+    let release
+    modelGate = new Promise(resolvePromise => release = resolvePromise)
+    const before = modelRequests
+    const probe = ok(home,['models','probe'])
+    await until(() => modelRequests > before)
+    const controls = Promise.all([ok(home,['worker','status']), ok(home,['jobs','cancel',job.id])])
+    try {
+      const [status, cancelled] = await Promise.race([controls, delay(2000).then(() => { throw new Error('Control commands blocked by model probe') })])
+      assert.equal(status.pid > 0, true); assert.equal(cancelled.status,'cancelled')
+    } finally { release(); modelGate = undefined; await probe; await controls }
+    await until(async () => (await ok(home,['worker','status'])).active === 0)
+  })
+  await t.test('download retry survives removed profile and keeps its timeout snapshot', async () => {
+    await ok(home,['profile','set','archive-download','--base-url',base,'--api-key','secret-key','--model','original-download'])
+    failDownloads = true
+    const response = await cli(home,['generate','--profile','archive-download','--prompt','url','--wait'])
+    assert.equal(response.code,1)
+    const failed = response.result.data
+    const before = requests.length
+    await ok(home,['profile','remove','archive-download'])
+    await ok(home,['config','set','--generation-timeout','11','--download-timeout','12'])
+    failDownloads = false
+    try {
+      const retried = await ok(home,['jobs','retry',failed.id,'--wait'])
+      assert.equal(retried.parentId,failed.id); assert.equal(retried.status,'succeeded')
+      assert.equal(retried.generationTimeout,failed.generationTimeout); assert.equal(retried.downloadTimeout,failed.downloadTimeout)
+      assert.equal(requests.length,before)
+    } finally { await ok(home,['config','set','--generation-timeout','600','--download-timeout','60']) }
+  })
+  await t.test('generation retry uses original connection after profile edits and removal', async () => {
+    await ok(home,['profile','set','archive-generation','--base-url',base,'--api-key','secret-key','--model','original-generation'])
+    const hold = await ok(home,['generate','--prompt','hold archive'])
+    const parent = await ok(home,['generate','--profile','archive-generation','--prompt','archive generation'])
+    await ok(home,['jobs','cancel',parent.id]); await ok(home,['jobs','cancel',hold.id])
+    await until(async () => (await ok(home,['worker','status'])).active === 0)
+    await ok(home,['profile','set','archive-generation','--base-url','http://127.0.0.1:1/v1','--api-key','replacement-key','--size','100x100'])
+    await ok(home,['profile','remove','archive-generation'])
+    const retried = await ok(home,['jobs','retry',parent.id,'--wait'])
+    assert.equal(retried.parentId,parent.id); assert.equal(retried.settings.model,'original-generation')
+    const request = requests.find(r => r.input.prompt === 'archive generation')
+    assert.equal(request.headers.authorization,'Bearer secret-key'); assert.equal(request.input.model,'original-generation')
+  })
+  await t.test('checkpoint download retry needs neither original references nor credentials', async () => {
+    const path = join(root,'retry-input.png'); await writeFile(path,png)
+    failDownloads = true
+    const response = await cli(home,['edit','--prompt','url','--image',path,'--wait'])
+    assert.equal(response.code,1)
+    const parent = response.result.data, before = requests.length
+    await rm(join(home,'jobs',parent.id,'inputs'), {recursive:true,force:true})
+    await rm(join(home,'jobs',parent.id,'credentials.json'))
+    failDownloads = false
+    const retried = await ok(home,['jobs','retry',parent.id,'--wait'])
+    assert.equal(retried.status,'succeeded'); assert.equal(retried.parentId,parent.id)
+    assert.deepEqual(await readFile(retried.files[0]),png); assert.equal(requests.length,before)
+  })
+  await t.test('batch results preserve successful files alongside failures and single waits', async () => {
+    const batch = await cli(home,['batch','--input','-','--wait'],JSON.stringify([{mode:'generate',prompt:'successful batch'},{mode:'generate',prompt:'error'}]))
+    assert.equal(batch.code,1); assert.equal(batch.result.ok,true)
+    assert.deepEqual(batch.result.data.map(job => job.status), ['succeeded','failed'])
+    assert.deepEqual(await readFile(batch.result.data[0].files[0]),png)
+    const single = await ok(home,['batch','--input','-','--wait'],JSON.stringify([{mode:'generate',prompt:'single batch'}]))
+    assert.equal(Array.isArray(single),false); assert.equal(single.status,'succeeded')
+  })
+  await t.test('worker restores healthy queued jobs beside damaged records', async () => {
+    const hold = await ok(home,['generate','--prompt','hold damaged history'])
+    await until(() => requests.some(r => r.input.prompt === 'hold damaged history'))
+    const queued = await ok(home,['generate','--prompt','healthy after damage'])
+    const status = await ok(home,['worker','status']); process.kill(status.pid,'SIGKILL'); await delay(200)
+    const badId = randomUUID(), path = join(home,'jobs',badId,'job.json')
+    await mkdir(join(home,'jobs',badId), {recursive:true}); await writeFile(path,'{invalid record')
+    try {
+      const restored = await ok(home,['worker','start'])
+      assert.deepEqual(restored.invalidJobs,[badId])
+      assert.equal((await ok(home,['jobs','wait',queued.id])).status,'succeeded')
+      assert.equal((await ok(home,['jobs','show',hold.id])).status,'interrupted')
+      const invalid = await cli(home,['jobs','show',badId])
+      assert.equal(invalid.result.error.code,'JOB_RECORD_INVALID')
+      assert.equal(await readFile(path,'utf8'),'{invalid record')
+      const log = await readFile(join(home,'worker.log'),'utf8')
+      assert.ok(log.includes(badId)); assert.equal(log.includes('{invalid record'),false)
+    } finally { await rm(join(home,'jobs',badId), {recursive:true,force:true}) }
   })
 })

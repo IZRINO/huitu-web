@@ -136,6 +136,17 @@ export function validateConfig(c) {
     if (!Object.hasOwn(c.profiles, c.defaultProfile))
         throw new CliError('Default profile does not exist');
 }
+export function resolveProfile(config, name = config.defaultProfile, overrides = {}) {
+    text(name, 'profile');
+    profileName(name);
+    if (!Object.hasOwn(config.profiles, name))
+        throw new CliError(`Unknown profile: ${name}`);
+    const profile = mergeProfile(mergeProfile(config.defaults, config.profiles[name]), overrides);
+    const settings = { ...defaultSettings(), useProxy: false, ...profile.settings };
+    if (settings.useProxy && !settings.relayUrl)
+        throw new CliError('CLI proxy mode requires relayUrl');
+    return { name, profile, settings };
+}
 export function resolveSpec(config, input) {
     object(input, 'job');
     keys(input, ['mode', 'prompt', 'profile', 'settings', 'params', 'apiKeyEnv', 'outputDir', 'images', 'mask'], 'job');
@@ -145,10 +156,6 @@ export function resolveSpec(config, input) {
     if (!input.prompt.trim() || input.prompt.length > 32000)
         throw new CliError('prompt must contain 1-32000 characters');
     const spec = input;
-    const name = spec.profile ?? config.defaultProfile;
-    profileName(name);
-    if (!Object.hasOwn(config.profiles, name))
-        throw new CliError(`Unknown profile: ${name}`);
     const overrides = { settings: spec.settings, params: spec.params, apiKeyEnv: spec.apiKeyEnv, outputDir: spec.outputDir };
     for (const key of Object.keys(overrides))
         if (overrides[key] === undefined)
@@ -156,14 +163,11 @@ export function resolveSpec(config, input) {
     validateProfile(overrides);
     if (spec.settings?.apiKey)
         throw new CliError('Set API keys with profile set or an environment variable');
-    const merged = mergeProfile(mergeProfile(config.defaults, config.profiles[name]), overrides);
-    const settings = { ...defaultSettings(), useProxy: false, ...merged.settings };
+    const { name, settings, profile: merged } = resolveProfile(config, spec.profile ?? config.defaultProfile, overrides);
     const params = { ...defaultParams(), ...merged.params };
     const size = resolveSize(params), check = validateSize(size);
     if (!check.ok)
         throw new CliError(check.message);
-    if (settings.useProxy && !settings.relayUrl)
-        throw new CliError('CLI proxy mode requires relayUrl');
     const images = spec.images ?? [];
     if (!Array.isArray(images) || images.some(x => typeof x !== 'string') || images.length > 16)
         throw new CliError('images must contain at most 16 file paths');

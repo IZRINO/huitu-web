@@ -1,10 +1,10 @@
 import { createServer } from 'node:http';
 import { mkdir, rm, chmod, stat, copyFile } from 'node:fs/promises';
-import { join, basename } from 'node:path';
+import { join, basename, dirname } from 'node:path';
 import { randomUUID, randomBytes, timingSafeEqual } from 'node:crypto';
 import { requestImages, authHeaders, relayFetch, parseExtra } from '../src/lib/api.js';
 import { atomicJson, claimLock, endpoint, jobDir, loadConfig, loadJobs, readJson } from './store.js';
-import { mergeProfile, publicValue, resolveSpec, validateConfig, validateProfile, profileName, object } from './config.js';
+import { mergeProfile, publicValue, resolveProfile, resolveSpec, validateConfig, validateProfile, profileName, object } from './config.js';
 import { checkInput, downloadImage, imageFile, stageInputs } from './images.js';
 import { CliError, messageOf, terminal } from './types.js';
 export async function runWorker(home) {
@@ -14,7 +14,11 @@ export async function runWorker(home) {
     try {
         const socketPath = endpoint(home), runtime = join(home, 'runtime.json');
         let config = await loadConfig(home);
-        const jobs = new Map((await loadJobs(home)).map(job => [job.id, job]));
+        const invalidJobs = [];
+        const jobs = new Map((await loadJobs(home, id => {
+            invalidJobs.push(id);
+            console.error(`Skipping invalid job record: ${id}; original file preserved`);
+        })).map(job => [job.id, job]));
         let sequence = Math.max(0, ...[...jobs.values()].map(job => job.sequence));
         const active = new Map();
         const environment = { ...process.env };
@@ -156,6 +160,8 @@ export async function runWorker(home) {
             }
         }
         function find(id) {
+            if (invalidJobs.includes(String(id)))
+                throw new CliError('Job record is invalid; original file preserved, inspect worker status and local record', 'JOB_RECORD_INVALID');
             const job = jobs.get(String(id));
             if (!job)
                 throw new CliError('Unknown job', 'NOT_FOUND');
@@ -164,33 +170,43 @@ export async function runWorker(home) {
         async function submit(input, parent, publish = true) {
             if (stopping)
                 throw new CliError('Worker is stopping', 'WORKER_STOPPING', 1);
-            const spec = input;
-            const resolved = resolveSpec(config, input);
-            const credentials = parent ? await readJson(join(jobDir(home, parent.id), 'credentials.json')) : { apiKey: keyFor(resolved.name, resolved.apiKeyEnv), relayToken: resolved.settings.relayToken || '' };
-            if (!credentials.apiKey)
+            const spec = parent ?? input;
+            // A retry uses the persisted snapshot, independent of today's profiles.
+            const resolved = parent ? { name: parent.profile, settings: parent.settings, params: parent.params, size: parent.size,
+                apiKeyEnv: parent.apiKeyEnv, images: parent.images, outputDir: dirname(parent.outputDir) } : resolveSpec(config, input);
+            const responsePath = parent ? join(jobDir(home, parent.id), 'response.json') : undefined;
+            const hasResponse = responsePath && await stat(responsePath).then(() => true, error => {
+                if (error.code !== 'ENOENT')
+                    throw error;
+                return false;
+            });
+            const response = hasResponse ? await readJson(responsePath) : undefined;
+            const credentials = parent ? await readJson(join(jobDir(home, parent.id), 'credentials.json')).catch(error => {
+                if (response && error.code === 'ENOENT')
+                    return { apiKey: '' };
+                throw error;
+            }) : { apiKey: keyFor(resolved.name, resolved.apiKeyEnv), relayToken: resolved.settings.relayToken || '' };
+            if (!response && !credentials.apiKey)
                 throw new CliError('Missing API key; configure profile or restart worker with its key environment variable', 'MISSING_CREDENTIALS');
-            for (const path of resolved.images)
-                await checkInput(path);
-            if (spec.mask)
-                await checkInput(spec.mask, true);
+            if (!response) {
+                for (const path of resolved.images)
+                    await checkInput(path);
+                if (spec.mask)
+                    await checkInput(spec.mask, true);
+            }
             const id = randomUUID(), dir = jobDir(home, id);
             await mkdir(dir, { recursive: true, mode: 0o700 });
             try {
-                const staged = await stageInputs(dir, resolved.images, spec.mask);
+                const staged = response ? { images: resolved.images, mask: spec.mask } : await stageInputs(dir, resolved.images, spec.mask);
                 await atomicJson(join(dir, 'credentials.json'), credentials);
                 const job = { id, sequence: ++sequence, status: 'queued', mode: spec.mode, prompt: spec.prompt.trim(),
                     profile: resolved.name, settings: { ...resolved.settings, apiKey: '', relayToken: '' }, apiKeyEnv: resolved.apiKeyEnv,
                     params: resolved.params, size: resolved.size, ...staged, outputDir: join(resolved.outputDir, id),
-                    generationTimeout: config.generationTimeout, downloadTimeout: config.downloadTimeout,
+                    generationTimeout: parent?.generationTimeout ?? config.generationTimeout, downloadTimeout: parent?.downloadTimeout ?? config.downloadTimeout,
                     createdAt: new Date().toISOString(), files: [] };
                 if (parent) {
                     job.parentId = parent.id;
-                    job.settings = { ...parent.settings, relayToken: '' };
-                    job.params = { ...parent.params };
-                    job.size = parent.size;
-                    job.apiKeyEnv = parent.apiKeyEnv;
-                    if (await stat(join(jobDir(home, parent.id), 'response.json')).then(() => true, () => false)) {
-                        const response = await readJson(join(jobDir(home, parent.id), 'response.json'));
+                    if (response) {
                         await atomicJson(join(dir, 'response.json'), response);
                         job.status = 'downloading';
                         job.usage = parent.usage;
@@ -222,7 +238,7 @@ export async function runWorker(home) {
         }
         async function handle(command, args) {
             switch (command) {
-                case 'status': return { pid: process.pid, stopping, concurrency: config.concurrency, active: active.size, queued: [...jobs.values()].filter(j => j.status === 'queued').length };
+                case 'status': return { pid: process.pid, stopping, concurrency: config.concurrency, active: active.size, queued: [...jobs.values()].filter(j => j.status === 'queued').length, invalidJobs };
                 case 'stop':
                     stopping = true;
                     return { stopping: true };
@@ -265,8 +281,8 @@ export async function runWorker(home) {
                     return saveConfig({ ...config, profiles });
                 }
                 case 'models': {
-                    const resolved = resolveSpec(config, { mode: 'generate', prompt: 'probe', profile: args.profile });
-                    const apiKey = keyFor(resolved.name, resolved.apiKeyEnv);
+                    const resolved = resolveProfile(config, args.profile);
+                    const apiKey = keyFor(resolved.name, resolved.profile.apiKeyEnv);
                     if (!apiKey)
                         throw new CliError('Missing API key');
                     const response = await relayFetch({ ...resolved.settings, apiKey }, `${resolved.settings.baseUrl.replace(/\/+$/, '')}/models`, { headers: authHeaders(apiKey), signal: AbortSignal.timeout(12000) });
@@ -307,6 +323,11 @@ export async function runWorker(home) {
                 }
                 case 'jobs.list': return [...jobs.values()].filter(j => !args.status || j.status === args.status).map(jobView);
                 case 'jobs.show': return jobView(find(args.id));
+                case 'jobs.showMany': {
+                    if (!Array.isArray(args.ids) || !args.ids.length || args.ids.some(id => typeof id !== 'string'))
+                        throw new CliError('ids must be a nonempty array of job IDs');
+                    return args.ids.map(id => jobView(find(id)));
+                }
                 case 'jobs.cancel': {
                     const job = find(args.id);
                     if (!terminal(job.status)) {
@@ -321,13 +342,13 @@ export async function runWorker(home) {
                     const parent = find(args.id);
                     if (!['failed', 'cancelled', 'interrupted'].includes(parent.status) || active.has(parent.id))
                         throw new CliError('Retry requires a finished failed, cancelled or interrupted job');
-                    return jobView(await submit({ mode: parent.mode, prompt: parent.prompt, profile: parent.profile, settings: parent.settings, params: parent.params,
-                        images: parent.images, mask: parent.mask, outputDir: join(parent.outputDir, '..'), apiKeyEnv: parent.apiKeyEnv }, parent));
+                    return jobView(await submit(parent, parent));
                 }
                 default: throw new CliError(`Unknown command: ${command}`);
             }
         }
         const token = randomBytes(32).toString('hex');
+        const reads = new Set(['status', 'config.get', 'models', 'jobs.list', 'jobs.show', 'jobs.showMany']);
         let mutations = Promise.resolve();
         const server = createServer(async (req, res) => {
             res.setHeader('Content-Type', 'application/json');
@@ -348,8 +369,11 @@ export async function runWorker(home) {
                     chunks.push(chunk);
                 }
                 const input = JSON.parse(Buffer.concat(chunks).toString('utf8'));
-                const operation = mutations.catch(() => undefined).then(() => handle(input.command, input.args ?? {}));
-                mutations = operation;
+                const operation = reads.has(input.command)
+                    ? Promise.resolve().then(() => handle(input.command, input.args ?? {}))
+                    : mutations.catch(() => undefined).then(() => handle(input.command, input.args ?? {}));
+                if (!reads.has(input.command))
+                    mutations = operation;
                 const data = await operation;
                 res.end(JSON.stringify({ schemaVersion: 1, ok: true, data }));
             }

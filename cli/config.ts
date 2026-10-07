@@ -82,24 +82,27 @@ export function validateConfig(c: unknown): asserts c is Config {
   text(c.defaultProfile, 'defaultProfile')
   if (!Object.hasOwn(c.profiles, c.defaultProfile)) throw new CliError('Default profile does not exist')
 }
+export function resolveProfile(config: Config, name: unknown = config.defaultProfile, overrides: Profile = {}) {
+  text(name, 'profile'); profileName(name)
+  if (!Object.hasOwn(config.profiles, name)) throw new CliError(`Unknown profile: ${name}`)
+  const profile = mergeProfile(mergeProfile(config.defaults, config.profiles[name]), overrides)
+  const settings: Settings = { ...defaultSettings(), useProxy: false, ...profile.settings }
+  if (settings.useProxy && !settings.relayUrl) throw new CliError('CLI proxy mode requires relayUrl')
+  return { name, profile, settings }
+}
 export function resolveSpec(config: Config, input: unknown) {
   object(input, 'job'); keys(input, ['mode', 'prompt', 'profile', 'settings', 'params', 'apiKeyEnv', 'outputDir', 'images', 'mask'], 'job')
   if (input.mode !== 'generate' && input.mode !== 'edit') throw new CliError('mode must be generate or edit')
   text(input.prompt, 'prompt'); if (!input.prompt.trim() || input.prompt.length > 32000) throw new CliError('prompt must contain 1-32000 characters')
   const spec = input as unknown as JobSpec
-  const name = spec.profile ?? config.defaultProfile
-  profileName(name)
-  if (!Object.hasOwn(config.profiles, name)) throw new CliError(`Unknown profile: ${name}`)
   const overrides = { settings: spec.settings, params: spec.params, apiKeyEnv: spec.apiKeyEnv, outputDir: spec.outputDir }
   for (const key of Object.keys(overrides) as (keyof Profile)[]) if (overrides[key] === undefined) delete overrides[key]
   validateProfile(overrides)
   if (spec.settings?.apiKey) throw new CliError('Set API keys with profile set or an environment variable')
-  const merged = mergeProfile(mergeProfile(config.defaults, config.profiles[name]), overrides)
-  const settings: Settings = { ...defaultSettings(), useProxy: false, ...merged.settings }
+  const { name, settings, profile: merged } = resolveProfile(config, spec.profile ?? config.defaultProfile, overrides)
   const params = { ...defaultParams(), ...merged.params }
   const size = resolveSize(params), check = validateSize(size)
   if (!check.ok) throw new CliError(check.message)
-  if (settings.useProxy && !settings.relayUrl) throw new CliError('CLI proxy mode requires relayUrl')
   const images = spec.images ?? []
   if (!Array.isArray(images) || images.some(x => typeof x !== 'string') || images.length > 16) throw new CliError('images must contain at most 16 file paths')
   if (spec.mask !== undefined) text(spec.mask, 'mask')

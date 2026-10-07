@@ -1,21 +1,17 @@
 import type { PrintRecord } from '../types'
+import { dataUrlToBlob } from './format'
 
 const NAME = 'huitu-prints'
 const STORE = 'prints'
+const IMAGES = 'images'
 const MAX = 80
+const MAX_BYTES = 256 * 1024 * 1024
+let connection: Promise<IDBDatabase> | undefined
 
-function openDb(): Promise<IDBDatabase> {
+function requestValue<T>(request: IDBRequest<T>): Promise<T> {
   return new Promise((resolve, reject) => {
-    const req = indexedDB.open(NAME, 1)
-    req.onupgradeneeded = () => {
-      const db = req.result
-      if (!db.objectStoreNames.contains(STORE)) {
-        const store = db.createObjectStore(STORE, { keyPath: 'id' })
-        store.createIndex('createdAt', 'createdAt')
-      }
-    }
-    req.onsuccess = () => resolve(req.result)
-    req.onerror = () => reject(req.error)
+    request.onsuccess = () => resolve(request.result)
+    request.onerror = () => reject(request.error)
   })
 }
 
@@ -27,45 +23,122 @@ function txDone(tx: IDBTransaction): Promise<void> {
   })
 }
 
-export async function listPrints(): Promise<PrintRecord[]> {
-  const db = await openDb()
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(STORE, 'readonly')
-    const req = tx.objectStore(STORE).index('createdAt').getAll()
-    req.onsuccess = () => {
-      const rows = (req.result as PrintRecord[]).sort((a, b) => b.createdAt - a.createdAt)
-      resolve(rows)
-    }
-    req.onerror = () => reject(req.error)
-  })
+async function thumbnail(blob: Blob): Promise<string> {
+  const image = await createImageBitmap(blob)
+  try {
+    const scale = Math.min(1, 160 / Math.max(image.width, image.height))
+    const canvas = document.createElement('canvas')
+    canvas.width = Math.max(1, Math.round(image.width * scale))
+    canvas.height = Math.max(1, Math.round(image.height * scale))
+    const context = canvas.getContext('2d')
+    if (!context) throw new Error('无法生成历史缩略图')
+    context.drawImage(image, 0, 0, canvas.width, canvas.height)
+    return canvas.toDataURL('image/webp', 0.75)
+  } finally { image.close() }
 }
 
-export async function putPrint(record: PrintRecord): Promise<void> {
+async function migrateLegacy(db: IDBDatabase): Promise<void> {
+  // Migrate one original at a time; keep each original until its replacement commits.
+  const keys = await requestValue(db.transaction(STORE).objectStore(STORE).getAllKeys())
+  for (const key of keys) {
+    const legacy = await requestValue(db.transaction(STORE).objectStore(STORE).get(key)) as PrintRecord & { dataUrl?: string }
+    if (!legacy?.dataUrl) continue
+    const blob = dataUrlToBlob(legacy.dataUrl)
+    let preview: string
+    try { preview = await thumbnail(blob) } catch {
+      const canvas = document.createElement('canvas')
+      canvas.width = 1; canvas.height = 1
+      preview = canvas.toDataURL('image/png')
+    }
+    const record = { ...legacy, thumbnail: preview, bytes: blob.size }
+    delete record.dataUrl
+    const tx = db.transaction([STORE, IMAGES], 'readwrite')
+    const current = tx.objectStore(STORE).get(key)
+    current.onsuccess = () => {
+      if (!current.result?.dataUrl) return
+      tx.objectStore(STORE).put(record)
+      tx.objectStore(IMAGES).put({ id: record.id, blob })
+    }
+    await txDone(tx)
+  }
+}
+
+function openDb(): Promise<IDBDatabase> {
+  if (connection) return connection
+  connection = new Promise<IDBDatabase>((resolve, reject) => {
+    let blocked = false
+    const req = indexedDB.open(NAME, 2)
+    req.onupgradeneeded = () => {
+      const db = req.result
+      if (!db.objectStoreNames.contains(STORE)) {
+        const store = db.createObjectStore(STORE, { keyPath: 'id' })
+        store.createIndex('createdAt', 'createdAt')
+      }
+      if (!db.objectStoreNames.contains(IMAGES)) db.createObjectStore(IMAGES, { keyPath: 'id' })
+    }
+    req.onsuccess = () => {
+      const db = req.result
+      if (blocked) { db.close(); return }
+      db.onversionchange = () => { db.close(); connection = undefined }
+      migrateLegacy(db).then(() => resolve(db), error => { db.close(); connection = undefined; reject(error) })
+    }
+    req.onerror = () => { connection = undefined; reject(req.error) }
+    req.onblocked = () => { blocked = true; connection = undefined; reject(new Error('请关闭旧版本页面后重试历史记录升级')) }
+  })
+  return connection
+}
+
+export async function listPrints(): Promise<PrintRecord[]> {
   const db = await openDb()
-  const tx = db.transaction(STORE, 'readwrite')
+  const rows = await requestValue(db.transaction(STORE).objectStore(STORE).index('createdAt').getAll()) as PrintRecord[]
+  return rows.reverse()
+}
+
+export async function getPrint(id: string): Promise<Blob | null> {
+  const db = await openDb()
+  const image = await requestValue(db.transaction(IMAGES).objectStore(IMAGES).get(id)) as { blob: Blob } | undefined
+  return image?.blob || null
+}
+
+export async function putPrints(records: PrintRecord[], blobs: Blob[]): Promise<PrintRecord[]> {
+  if (records.length !== blobs.length) throw new Error('历史记录与图片数量不一致')
+  const prepared = await Promise.all(records.map(async (record, index) => ({ ...record, thumbnail: await thumbnail(blobs[index]), bytes: blobs[index].size })))
+  const db = await openDb()
+  const tx = db.transaction([STORE, IMAGES], 'readwrite')
+  const done = txDone(tx)
   const store = tx.objectStore(STORE)
-  store.put(record)
-  const allReq = store.index('createdAt').getAll()
-  allReq.onsuccess = () => {
-    const rows = (allReq.result as PrintRecord[]).sort((a, b) => a.createdAt - b.createdAt)
-    const extra = rows.length - MAX
-    if (extra > 0) {
-      for (let i = 0; i < extra; i++) store.delete(rows[i].id)
+  const images = tx.objectStore(IMAGES)
+  for (const [index, record] of prepared.entries()) {
+    store.put(record)
+    images.put({ id: record.id, blob: blobs[index] })
+  }
+  const all = store.index('createdAt').getAll()
+  all.onsuccess = () => {
+    const rows = all.result as PrintRecord[]
+    let bytes = rows.reduce((sum, row) => sum + (row.bytes || 0), 0)
+    let count = rows.length
+    for (const row of rows) {
+      if (count <= MAX && bytes <= MAX_BYTES) break
+      store.delete(row.id); images.delete(row.id)
+      count--; bytes -= row.bytes || 0
     }
   }
-  await txDone(tx)
+  await done
+  return prepared
 }
 
 export async function deletePrint(id: string): Promise<void> {
   const db = await openDb()
-  const tx = db.transaction(STORE, 'readwrite')
+  const tx = db.transaction([STORE, IMAGES], 'readwrite')
   tx.objectStore(STORE).delete(id)
+  tx.objectStore(IMAGES).delete(id)
   await txDone(tx)
 }
 
 export async function clearPrints(): Promise<void> {
   const db = await openDb()
-  const tx = db.transaction(STORE, 'readwrite')
+  const tx = db.transaction([STORE, IMAGES], 'readwrite')
   tx.objectStore(STORE).clear()
+  tx.objectStore(IMAGES).clear()
   await txDone(tx)
 }

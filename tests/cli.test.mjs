@@ -159,9 +159,11 @@ test('CLI end-to-end: configuration, shared queue, editing, downloads and recove
     await rm(image); assert.deepEqual(await readFile(job.images[0]), png)
   })
   await t.test('absolute relay endpoint preserves relay headers', async () => {
-    await ok(home,['generate','--prompt','relay','--relay-url',base.replace('/v1','/api/relay'),'--wait'])
+    const job = await ok(home,['generate','--prompt','relay','--relay-url',base.replace('/v1','/api/relay'),'--relay-token','secret-relay-token','--wait'])
     const relay = requests.find(r => r.input.prompt === 'relay')
     assert.equal(relay.path,'/api/relay'); assert.equal(relay.headers['x-relay-url'],`${base}/images/generations`)
+    assert.equal(relay.headers['x-relay-token'],'secret-relay-token')
+    assert.equal((await readFile(join(home,'jobs',job.id,'job.json'),'utf8')).includes('secret-relay-token'),false)
     assert.equal(relay.headers['x-relay-organization'],'org-test'); assert.deepEqual(JSON.parse(relay.headers['x-relay-headers']),{'X-Test':'secret-header'})
   })
   await t.test('invalid batch and wait options do not submit tasks', async () => {

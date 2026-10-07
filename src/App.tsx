@@ -14,7 +14,7 @@ import { HistoryRail } from './components/HistoryRail'
 import { MaskPad } from './components/MaskPad'
 import { SettingsDrawer } from './components/SettingsDrawer'
 import { editImage, generateImage } from './lib/api'
-import { clearPrints, deletePrint, listPrints, putPrint } from './lib/db'
+import { clearPrints, deletePrint, getPrint, listPrints, putPrints } from './lib/db'
 import { describeError } from './lib/errors'
 import {
   dataUrlToBlob,
@@ -37,9 +37,12 @@ const TEMPLATES = [
   { id: 'macro', label: '材质', text: '材质特写，微距，表面细节丰富，照明均匀。' },
 ]
 
-function dataUrlToFile(dataUrl: string, name: string): File {
-  const blob = dataUrlToBlob(dataUrl)
+function imageToFile(blob: Blob, name: string): File {
   return new File([blob], name, { type: blob.type || 'image/png' })
+}
+
+function revokeImages(images: GenImage[]) {
+  for (const image of images) URL.revokeObjectURL(image.dataUrl)
 }
 
 export default function App() {
@@ -53,7 +56,7 @@ export default function App() {
   const [variants, setVariants] = useState<GenImage[]>([])
   const [variantI, setVariantI] = useState(0)
   const [refs, setRefs] = useState<RefImage[]>([])
-  const [mask, setMask] = useState<Blob | null>(null)
+  const [mask, setMask] = useState<{ src: string; blob: Blob } | null>(null)
   const [showMask, setShowMask] = useState(false)
   const [compare, setCompare] = useState(false)
   const [split, setSplit] = useState(50)
@@ -63,57 +66,87 @@ export default function App() {
   const [over, setOver] = useState(false)
   const abortRef = useRef<AbortController | null>(null)
   const fileRef = useRef<HTMLInputElement>(null)
+  const refsRef = useRef<RefImage[]>([])
+  const variantsRef = useRef<GenImage[]>([])
+  const selectionRef = useRef(0)
+  const timersRef = useRef<Set<number>>(new Set())
+
+  const toast = useCallback((kind: ToastItem['kind'], text: string) => {
+    const id = uid()
+    setToasts((xs) => [...xs, { id, kind, text }])
+    const timer = window.setTimeout(() => { timersRef.current.delete(timer); setToasts((xs) => xs.filter((t) => t.id !== id)) }, 4200)
+    timersRef.current.add(timer)
+  }, [])
 
   useEffect(() => {
-    saveSettings(settings)
-  }, [settings])
+    try { saveSettings(settings) } catch { queueMicrotask(() => toast('err', '配置无法保存，请检查浏览器存储权限')) }
+  }, [settings, toast])
   useEffect(() => {
-    saveParams(params)
-  }, [params])
+    try { saveParams(params) } catch { queueMicrotask(() => toast('err', '参数无法保存，请检查浏览器存储权限')) }
+  }, [params, toast])
   useEffect(() => {
-    void listPrints().then(setPrints)
+    let disposed = false
+    void listPrints().then(rows => { if (!disposed) setPrints(rows) }).catch(err => { if (!disposed) toast('err', describeError(err)) })
+    return () => { disposed = true }
+  }, [toast])
+  useEffect(() => () => {
+    abortRef.current?.abort()
+    selectionRef.current++
+    for (const image of refsRef.current) URL.revokeObjectURL(image.url)
+    revokeImages(variantsRef.current)
+    for (const timer of timersRef.current) clearTimeout(timer)
   }, [])
 
   const size = useMemo(() => resolveSize(params), [params])
   const sizeCheck = useMemo(() => validateSize(size), [size])
   const ready = Boolean(settings.baseUrl && settings.apiKey && settings.model)
-  const frame = partial || variants[variantI]?.dataUrl || current?.dataUrl || null
+  const frame = partial || variants[variantI]?.dataUrl || null
+  const maskSrc = refs[0]?.url || variants[variantI]?.dataUrl || null
   const ratio = sheetRatio(size === 'auto' && current ? current.size : size)
-
-  const toast = useCallback((kind: ToastItem['kind'], text: string) => {
-    const id = uid()
-    setToasts((xs) => [...xs, { id, kind, text }])
-    window.setTimeout(() => setToasts((xs) => xs.filter((t) => t.id !== id)), 4200)
-  }, [])
 
   function patchParams(part: Partial<Params>) {
     setParams((p) => ({ ...p, ...part }))
   }
 
+  function replaceVariants(next: GenImage[]) {
+    revokeImages(variantsRef.current)
+    variantsRef.current = next
+    setVariants(next)
+    setMask(null)
+  }
+
+  function replaceRefs(next: RefImage[]) {
+    const retained = new Set(next.map(image => image.id))
+    for (const image of refsRef.current) if (!retained.has(image.id)) URL.revokeObjectURL(image.url)
+    if (refsRef.current[0]?.id !== next[0]?.id) setMask(null)
+    refsRef.current = next
+    setRefs(next)
+  }
+
+  function frameBlob(): Blob | null {
+    return partial ? dataUrlToBlob(partial) : variants[variantI]?.blob || null
+  }
+
   function addFiles(files: FileList | File[]) {
-    const next: RefImage[] = []
+    const next = [...refsRef.current]
+    let bytes = next.reduce((sum, image) => sum + image.file.size, 0)
     for (const file of Array.from(files)) {
       const err = fileOk(file)
       if (err) {
         toast('err', err)
         continue
       }
+      if (next.length >= 16) { toast('info', '最多 16 张参考图'); break }
+      if (bytes + file.size > 127 * 1024 * 1024) { toast('err', '参考图总量不能超过 127MB'); continue }
+      bytes += file.size
       next.push({ id: uid(), file, url: URL.createObjectURL(file) })
     }
-    setRefs((xs) => {
-      const merged = [...xs, ...next].slice(0, 16)
-      if (xs.length + next.length > 16) toast('info', '最多 16 张参考图')
-      return merged
-    })
+    replaceRefs(next)
     if (next.length) setMode('edit')
   }
 
   function removeRef(id: string) {
-    setRefs((xs) => {
-      const hit = xs.find((x) => x.id === id)
-      if (hit) URL.revokeObjectURL(hit.url)
-      return xs.filter((x) => x.id !== id)
-    })
+    replaceRefs(refsRef.current.filter(image => image.id !== id))
   }
 
   async function persist(resultImages: GenImage[], usedPrompt: string, usedSize: string) {
@@ -128,19 +161,19 @@ export default function App() {
         size: usedSize,
         quality: params.quality,
         background: params.background,
-        format: params.format,
+        format: img.blob.type === 'image/jpeg' ? 'jpeg' : img.blob.type === 'image/webp' ? 'webp' : 'png',
         n: params.n,
-        dataUrl: img.dataUrl,
+        thumbnail: '',
       }
       records.push(rec)
-      await putPrint(rec)
     }
+    await putPrints(records, resultImages.map(image => image.blob))
     setPrints(await listPrints())
     setCurrent(records[0] ?? null)
   }
 
   async function expose() {
-    if (running) return
+    if (abortRef.current) return
     const text = prompt.trim()
     if (!text) {
       toast('err', '先写配方')
@@ -155,8 +188,9 @@ export default function App() {
       return
     }
     let images = refs.map((r) => r.file)
-    if (mode === 'edit' && images.length === 0 && frame) {
-      images = [dataUrlToFile(frame, 'plate.png')]
+    const blob = frameBlob()
+    if (mode === 'edit' && images.length === 0 && blob) {
+      images = [imageToFile(blob, 'plate.png')]
     }
     if (mode === 'edit' && images.length === 0) {
       toast('err', '改图需要底图，拖一张进来或先出图')
@@ -169,6 +203,7 @@ export default function App() {
     }
     const ctrl = new AbortController()
     abortRef.current = ctrl
+    selectionRef.current++
     setRunning(true)
     setPartial(null)
     try {
@@ -189,14 +224,16 @@ export default function App() {
         mode === 'edit'
           ? await editImage(
               settings,
-              { ...body, images, mask, input_fidelity: params.fidelity },
+              { ...body, images, mask: mask?.src === maskSrc ? mask.blob : null, input_fidelity: params.fidelity },
               { signal: ctrl.signal, onPartial: setPartial },
             )
           : await generateImage(settings, body, { signal: ctrl.signal, onPartial: setPartial })
-      setVariants(result.images)
+      if (ctrl.signal.aborted) { revokeImages(result.images); ctrl.signal.throwIfAborted() }
+      replaceVariants(result.images)
       setVariantI(0)
       setPartial(null)
-      await persist(result.images, text, result.size || size)
+      try { await persist(result.images, text, result.size || size) }
+      catch (err) { toast('err', `成片已生成，历史保存失败：${describeError(err)}`) }
       const line = usageLine(result.usage)
       toast('ok', line ? `成片 · ${line}` : '成片')
     } catch (err) {
@@ -212,14 +249,17 @@ export default function App() {
     if (!url) return
     const a = document.createElement('a')
     a.href = url
-    a.download = stampName('huitu', size, params.format)
+    const blob = frameBlob()
+    const format = blob?.type === 'image/jpeg' ? 'jpeg' : blob?.type === 'image/webp' ? 'webp' : 'png'
+    a.download = stampName('huitu', current?.size || size, format)
     a.click()
   }
 
   async function copyImg() {
     if (!frame) return
     try {
-      const blob = dataUrlToBlob(frame)
+      const blob = frameBlob()
+      if (!blob) return
       await navigator.clipboard.write([new ClipboardItem({ [blob.type]: blob })])
       toast('ok', '已复制到剪贴板')
     } catch {
@@ -227,31 +267,45 @@ export default function App() {
     }
   }
 
-  function pickPrint(item: PrintRecord) {
-    setCurrent(item)
-    setVariants([{ dataUrl: item.dataUrl }])
-    setVariantI(0)
-    setPrompt(item.prompt)
-    setPartial(null)
+  async function pickPrint(item: PrintRecord) {
+    const selection = ++selectionRef.current
+    try {
+      const blob = await getPrint(item.id)
+      if (selection !== selectionRef.current || abortRef.current) return
+      if (!blob) throw new Error('历史原图不存在')
+      replaceVariants([{ blob, dataUrl: URL.createObjectURL(blob) }])
+      setCurrent(item)
+      setVariantI(0)
+      setPrompt(item.prompt)
+      setPartial(null)
+    } catch (err) { toast('err', describeError(err)) }
   }
 
   async function dropPrint(id: string) {
-    await deletePrint(id)
-    setPrints(await listPrints())
-    if (current?.id === id) setCurrent(null)
+    const operation = ++selectionRef.current
+    try {
+      await deletePrint(id)
+      setPrints(await listPrints())
+      if (selectionRef.current === operation && current?.id === id) { setCurrent(null); replaceVariants([]) }
+    } catch (err) { toast('err', describeError(err)) }
   }
 
   async function wipeHistory() {
-    await clearPrints()
-    setPrints([])
-    setCurrent(null)
-    toast('ok', '底片已清空')
+    const operation = ++selectionRef.current
+    try {
+      await clearPrints()
+      setPrints([])
+      if (selectionRef.current === operation) { setCurrent(null); replaceVariants([]) }
+      toast('ok', '底片已清空')
+    } catch (err) { toast('err', describeError(err)) }
   }
 
   function fallPlate() {
-    if (!frame) return
-    const file = dataUrlToFile(frame, 'plate.png')
-    setRefs((xs) => [{ id: uid(), file, url: URL.createObjectURL(file) }, ...xs].slice(0, 16))
+    const blob = frameBlob()
+    if (!blob) return
+    const file = imageToFile(blob, 'plate.png')
+    const ref = { id: uid(), file, url: URL.createObjectURL(file) }
+    replaceRefs([ref, ...refsRef.current].slice(0, 16))
     setMode('edit')
     toast('info', '当前片已落成底图')
   }
@@ -285,8 +339,6 @@ export default function App() {
     return () => window.removeEventListener('paste', onPaste)
   })
 
-  const maskSrc = refs[0]?.url || frame
-
   return (
     <div className="app">
       <div className="grain" />
@@ -307,7 +359,7 @@ export default function App() {
         </div>
       </header>
 
-      <HistoryRail items={prints} currentId={current?.id ?? null} onPick={pickPrint} onDelete={(id) => void dropPrint(id)} />
+      <HistoryRail items={prints} currentId={current?.id ?? null} onPick={(item) => void pickPrint(item)} onDelete={(id) => void dropPrint(id)} />
 
       <main className="stage">
         <div
@@ -356,7 +408,7 @@ export default function App() {
             {variants.length > 1 && (
               <div className="variants">
                 {variants.map((v, i) => (
-                  <button key={v.dataUrl + i} className={i === variantI ? 'is-on' : ''} type="button" onClick={() => setVariantI(i)}>
+                  <button key={v.dataUrl} className={i === variantI ? 'is-on' : ''} type="button" onClick={() => { setVariantI(i); setMask(null) }}>
                     <img src={v.dataUrl} alt="" />
                   </button>
                 ))}
@@ -613,7 +665,7 @@ export default function App() {
                 对照
               </button>
             </div>
-            {showMask && maskSrc && <MaskPad src={maskSrc} onMask={setMask} />}
+            {showMask && maskSrc && <MaskPad key={maskSrc} src={maskSrc} onMask={(blob) => setMask(blob ? { src: maskSrc, blob } : null)} />}
           </div>
         )}
 

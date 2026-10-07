@@ -49,7 +49,7 @@ export function validateParams(input: unknown): asserts input is Partial<Params>
   }
 }
 export function validateSettings(input: unknown): asserts input is Partial<Settings> {
-  object(input, 'settings'); keys(input, [...Object.keys(defaultSettings()), 'relayUrl'], 'settings')
+  object(input, 'settings'); keys(input, [...Object.keys(defaultSettings()), 'relayUrl', 'relayToken'], 'settings')
   for (const [key, value] of Object.entries(input)) {
     if (key === 'useProxy') { if (typeof value !== 'boolean') throw new CliError('useProxy must be boolean') }
     else {
@@ -108,5 +108,5 @@ export function resolveSpec(config: Config, input: unknown) {
   return { name, settings, params, size, apiKeyEnv: merged.apiKeyEnv, images, outputDir: resolve(merged.outputDir ?? config.outputDir) }
 }
 export function publicValue<T>(value: T): T {
-  return JSON.parse(JSON.stringify(value, (key, val) => key === 'apiKey' || key === 'extraHeaders' ? '' : val)) as T
+  return JSON.parse(JSON.stringify(value, (key, val) => ['apiKey', 'relayToken', 'extraHeaders'].includes(key) ? '' : val)) as T
 }

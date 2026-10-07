@@ -7,7 +7,7 @@ import { ensureWorker, rpc } from './client.js';
 import { runWorker } from './worker.js';
 import { CliError, messageOf, terminal } from './types.js';
 import { object } from './config.js';
-const strings = ['home', 'profile', 'prompt', 'prompt-file', 'input', 'output', 'output-dir', 'base-url', 'api-key', 'api-key-env', 'model', 'organization', 'extra-headers', 'relay-url',
+const strings = ['home', 'profile', 'prompt', 'prompt-file', 'input', 'output', 'output-dir', 'base-url', 'api-key', 'api-key-env', 'model', 'organization', 'extra-headers', 'relay-url', 'relay-token',
     'quality', 'background', 'format', 'compression', 'moderation', 'fidelity', 'partial-images', 'n', 'size-mode', 'size-preset', 'aspect', 'long-edge', 'custom-w', 'custom-h', 'size', 'mask',
     'concurrency', 'generation-timeout', 'download-timeout', 'wait-timeout', 'status'];
 const booleans = ['json', 'wait', 'help', 'stream', 'no-stream', 'use-proxy', 'no-use-proxy'];
@@ -16,7 +16,7 @@ const optionDefinitions = Object.fromEntries([
     ...booleans.map(key => [key, { type: 'boolean' }]),
     ['image', { type: 'string', multiple: true }],
 ]);
-const settingFields = { 'base-url': 'baseUrl', 'api-key': 'apiKey', 'model': 'model', 'organization': 'organization', 'extra-headers': 'extraHeaders', 'relay-url': 'relayUrl' };
+const settingFields = { 'base-url': 'baseUrl', 'api-key': 'apiKey', 'model': 'model', 'organization': 'organization', 'extra-headers': 'extraHeaders', 'relay-url': 'relayUrl', 'relay-token': 'relayToken' };
 const paramFields = { quality: 'quality', background: 'background', format: 'format', compression: 'compression', moderation: 'moderation', fidelity: 'fidelity',
     'partial-images': 'partialImages', n: 'n', 'size-mode': 'sizeMode', 'size-preset': 'sizePreset', aspect: 'aspect', 'long-edge': 'longEdge', 'custom-w': 'customW', 'custom-h': 'customH' };
 const numeric = new Set(['compression', 'partial-images', 'n', 'long-edge', 'custom-w', 'custom-h']);
@@ -35,7 +35,7 @@ Tasks:
 Worker:
   worker start | stop | restart | status
 
-Connection: --profile --base-url --model --organization --extra-headers JSON --relay-url
+Connection: --profile --base-url --model --organization --extra-headers JSON --relay-url --relay-token
             --use-proxy / --no-use-proxy --api-key-env (profile set also accepts --api-key)
 Image: --quality auto|low|medium|high|xhigh|max --background auto|transparent|opaque
        --format png|webp|jpeg --compression 0..100 --moderation auto|low --fidelity high|low

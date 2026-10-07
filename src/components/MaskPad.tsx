@@ -9,47 +9,59 @@ interface Props {
 export function MaskPad({ src, onMask }: Props) {
   const viewRef = useRef<HTMLCanvasElement>(null)
   const maskRef = useRef<HTMLCanvasElement>(null)
+  const overlayRef = useRef<HTMLCanvasElement>(null)
   const imgRef = useRef<HTMLImageElement | null>(null)
   const onMaskRef = useRef(onMask)
   const [brush, setBrush] = useState(36)
   const [erase, setErase] = useState(false)
   const drawing = useRef(false)
-  onMaskRef.current = onMask
+  const revision = useRef(0)
+  const loadRevision = useRef(0)
+  const scheduled = useRef<number | null>(null)
+  useEffect(() => { onMaskRef.current = onMask }, [onMask])
 
   function paint() {
     const view = viewRef.current
     const mask = maskRef.current
+    const overlay = overlayRef.current
     const img = imgRef.current
-    if (!view || !mask || !img) return
-    const ctx = view.getContext('2d', { willReadFrequently: true })
-    const mctx = mask.getContext('2d', { willReadFrequently: true })
-    if (!ctx || !mctx) return
+    if (!view || !mask || !overlay || !img) return
+    const ctx = view.getContext('2d')
+    const octx = overlay.getContext('2d')
+    if (!ctx || !octx) return
     ctx.clearRect(0, 0, view.width, view.height)
     ctx.drawImage(img, 0, 0)
-    const data = mctx.getImageData(0, 0, mask.width, mask.height)
-    const overlay = ctx.getImageData(0, 0, view.width, view.height)
-    for (let i = 0; i < data.data.length; i += 4) {
-      if (data.data[i + 3] < 16) {
-        overlay.data[i] = Math.round(overlay.data[i] * 0.5 + 196 * 0.5)
-        overlay.data[i + 1] = Math.round(overlay.data[i + 1] * 0.5 + 91 * 0.5)
-        overlay.data[i + 2] = Math.round(overlay.data[i + 2] * 0.5 + 58 * 0.5)
-      }
-    }
-    ctx.putImageData(overlay, 0, 0)
+    octx.clearRect(0, 0, overlay.width, overlay.height)
+    octx.globalAlpha = 0.5
+    octx.fillStyle = '#c45b3a'
+    octx.fillRect(0, 0, overlay.width, overlay.height)
+    octx.globalAlpha = 1
+    octx.globalCompositeOperation = 'destination-out'
+    octx.drawImage(mask, 0, 0)
+    octx.globalCompositeOperation = 'source-over'
+    ctx.drawImage(overlay, 0, 0)
   }
 
   useEffect(() => {
+    const lifecycle = loadRevision
+    const exportRevision = revision
+    const frame = scheduled
+    const version = ++loadRevision.current
     const img = new Image()
     img.onload = () => {
+      if (loadRevision.current !== version) return
       imgRef.current = img
       const view = viewRef.current
       const mask = maskRef.current
-      if (!view || !mask) return
+      const overlay = overlayRef.current
+      if (!view || !mask || !overlay) return
       view.width = img.width
       view.height = img.height
       mask.width = img.width
       mask.height = img.height
-      const mctx = mask.getContext('2d', { willReadFrequently: true })
+      overlay.width = img.width
+      overlay.height = img.height
+      const mctx = mask.getContext('2d')
       if (mctx) {
         mctx.fillStyle = '#fff'
         mctx.fillRect(0, 0, mask.width, mask.height)
@@ -58,6 +70,14 @@ export function MaskPad({ src, onMask }: Props) {
       onMaskRef.current(null)
     }
     img.src = src
+    return () => {
+      lifecycle.current++
+      exportRevision.current++
+      img.onload = null
+      drawing.current = false
+      if (frame.current !== null) cancelAnimationFrame(frame.current)
+      frame.current = null
+    }
   }, [src])
 
   function pos(e: PointerEvent<HTMLCanvasElement>) {
@@ -73,7 +93,7 @@ export function MaskPad({ src, onMask }: Props) {
   function dab(x: number, y: number) {
     const mask = maskRef.current
     if (!mask) return
-    const ctx = mask.getContext('2d', { willReadFrequently: true })
+    const ctx = mask.getContext('2d')
     if (!ctx) return
     ctx.beginPath()
     ctx.arc(x, y, brush, 0, Math.PI * 2)
@@ -86,13 +106,14 @@ export function MaskPad({ src, onMask }: Props) {
     }
     ctx.fill()
     ctx.globalCompositeOperation = 'source-over'
-    paint()
+    if (scheduled.current === null) scheduled.current = requestAnimationFrame(() => { scheduled.current = null; paint() })
   }
 
   function emit() {
     const mask = maskRef.current
     if (!mask) return
-    mask.toBlob((blob) => onMaskRef.current(blob), 'image/png')
+    const version = ++revision.current
+    mask.toBlob((blob) => { if (revision.current === version) onMaskRef.current(blob) }, 'image/png')
   }
 
   function onDown(e: PointerEvent<HTMLCanvasElement>) {
@@ -113,9 +134,10 @@ export function MaskPad({ src, onMask }: Props) {
   }
 
   function clear() {
+    revision.current++
     const mask = maskRef.current
     if (!mask) return
-    const ctx = mask.getContext('2d', { willReadFrequently: true })
+    const ctx = mask.getContext('2d')
     if (!ctx) return
     ctx.globalCompositeOperation = 'source-over'
     ctx.fillStyle = '#fff'
@@ -149,8 +171,10 @@ export function MaskPad({ src, onMask }: Props) {
           onPointerMove={onMove}
           onPointerUp={onUp}
           onPointerLeave={onUp}
+          onPointerCancel={onUp}
         />
         <canvas ref={maskRef} hidden />
+        <canvas ref={overlayRef} hidden />
       </div>
     </div>
   )

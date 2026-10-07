@@ -1,6 +1,6 @@
 import type { Background, Fidelity, GenResult, Moderation, OutputFormat, Quality, Settings } from '../types.js'
 import { describeHttp } from './errors.js'
-import { b64ToDataUrl, blobToDataUrl, joinUrl } from './format.js'
+import { b64ToDataUrl, dataUrlToBlob, joinUrl } from './format.js'
 
 export interface GenerateBody {
   prompt: string
@@ -48,6 +48,7 @@ export async function relayFetch(
   if (settings.useProxy) {
     const headers = new Headers(init.headers)
     headers.set('x-relay-url', target)
+    if (settings.relayToken) headers.set('x-relay-token', settings.relayToken)
     if (settings.organization) headers.set('x-relay-organization', settings.organization)
     if (Object.keys(extra).length) headers.set('x-relay-headers', JSON.stringify(extra))
     return fetch(settings.relayUrl || '/api/relay', { ...init, headers })
@@ -81,22 +82,29 @@ export interface ImagesResponse {
   error?: { message?: string; code?: string }
 }
 
-async function urlToDataUrl(url: string): Promise<string> {
-  if (url.startsWith('data:')) return url
-  const res = await fetch(url)
+async function urlToBlob(url: string, signal: AbortSignal): Promise<Blob> {
+  if (url.startsWith('data:')) return dataUrlToBlob(url)
+  const res = await fetch(url, { signal: AbortSignal.any([signal, AbortSignal.timeout(60000)]) })
   if (!res.ok) throw new Error('结果地址下载失败')
-  return blobToDataUrl(await res.blob())
+  return res.blob()
 }
 
-async function collectImages(data: ImagePayload[], format: string): Promise<GenResult['images']> {
+async function collectImages(data: ImagePayload[], format: string, signal: AbortSignal): Promise<GenResult['images']> {
   const images: GenResult['images'] = []
-  for (const item of data) {
-    if (item.b64_json) images.push({ dataUrl: b64ToDataUrl(item.b64_json, format), b64: item.b64_json })
-    else if (item.result) images.push({ dataUrl: b64ToDataUrl(item.result, format), b64: item.result })
-    else if (item.url) images.push({ dataUrl: await urlToDataUrl(item.url) })
+  try {
+    for (const item of data) {
+      signal.throwIfAborted()
+      const raw = item.b64_json || item.result
+      const blob = raw ? dataUrlToBlob(b64ToDataUrl(raw, format)) : item.url ? await urlToBlob(item.url, signal) : null
+      signal.throwIfAborted()
+      if (blob) images.push({ blob, dataUrl: URL.createObjectURL(blob) })
+    }
+    if (!images.length) throw new Error('中转站没有返回图片')
+    return images
+  } catch (error) {
+    for (const image of images) URL.revokeObjectURL(image.dataUrl)
+    throw error
   }
-  if (!images.length) throw new Error('中转站没有返回图片')
-  return images
 }
 
 async function readSse(res: Response, format: string, onPartial?: (dataUrl: string) => void): Promise<ImagesResponse> {
@@ -176,9 +184,9 @@ export async function parseResponse(res: Response, format: string, stream: boole
   return payload
 }
 
-async function browserResult(payload: ImagesResponse, format: string): Promise<GenResult> {
+async function browserResult(payload: ImagesResponse, format: string, signal: AbortSignal): Promise<GenResult> {
   return {
-    images: await collectImages(payload.data ?? [], format),
+    images: await collectImages(payload.data ?? [], payload.output_format || format, signal),
     usage: payload.usage,
     size: payload.size,
     quality: payload.quality,
@@ -227,7 +235,8 @@ export async function requestImages(
 }
 
 export async function generateImage(settings: Settings, body: GenerateBody, handlers: StreamHandlers): Promise<GenResult> {
-  return browserResult(await requestImages(settings, body, handlers), body.output_format)
+  const signal = AbortSignal.any([handlers.signal, AbortSignal.timeout(600000)])
+  return browserResult(await requestImages(settings, body, { ...handlers, signal }), body.output_format, signal)
 }
 
 export async function editImage(
@@ -235,7 +244,8 @@ export async function editImage(
   body: EditBody,
   handlers: StreamHandlers,
 ): Promise<GenResult> {
-  return browserResult(await requestImages(settings, body, handlers), body.output_format)
+  const signal = AbortSignal.any([handlers.signal, AbortSignal.timeout(600000)])
+  return browserResult(await requestImages(settings, body, { ...handlers, signal }), body.output_format, signal)
 }
 
 export async function testRelay(settings: Settings): Promise<string> {

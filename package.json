@@ -12,6 +12,8 @@
     "build:skill": "node scripts/build-skill.mjs",
     "test:skill": "node scripts/test-skill.mjs",
     "test:cli": "npm run build:cli && node --test tests/cli.test.mjs",
+    "test": "node --test tests/server.test.mjs tests/browser-data.test.mjs && npm run test:skill",
+    "test:web": "npm run build && node --test tests/web.test.mjs",
     "cli": "node bin/huitu.mjs",
     "prepare": "npm run build:cli",
     "lint": "oxlint",
@@ -21,6 +23,7 @@
   "dependencies": {
     "@fontsource/barlow-condensed": "^5.3.0",
     "@phosphor-icons/react": "^2.1.10",
+    "ipaddr.js": "^2.5.0",
     "react": "^19.2.8",
     "react-dom": "^19.2.8"
   },
@@ -30,6 +33,7 @@
     "@types/react-dom": "^19.2.7",
     "@vitejs/plugin-react": "^6.1.1",
     "oxlint": "^1.81.0",
+    "playwright": "^1.63.0",
     "typescript": "~6.0.2",
     "vite": "^8.3.0"
   }

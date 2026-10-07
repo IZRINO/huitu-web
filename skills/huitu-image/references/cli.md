@@ -59,6 +59,7 @@ Precedence: built-in defaults, global `config set`, named `profile set`, then pe
 | `--organization` | `settings.organization` | Empty |
 | `--extra-headers` | `settings.extraHeaders` | JSON string containing an object with string values |
 | `--relay-url` | `settings.relayUrl` | Absolute relay URL, e.g. `http://127.0.0.1:4173/api/relay` |
+| `--relay-token` | `settings.relayToken` | Optional independent relay access token; forwarded only to the relay |
 | `--use-proxy` / `--no-use-proxy` | `settings.useProxy` | CLI default `false`; specifying a relay URL enables it |
 | `--quality` | `params.quality` | `auto`; also `low/medium/high/xhigh/max` |
 | `--background` | `params.background` | `auto`; also `transparent/opaque` |
@@ -95,7 +96,7 @@ huitu config import --input huitu-config.json --profile main
 huitu config export --output cli-config.json
 ```
 
-Web configuration import preserves the local key. The browser's same-origin proxy setting becomes a direct connection, with a notice; set `--relay-url` afterward if a relay is needed. CLI exports contain all named profiles but leave keys and extra headers empty. Reconfigure extra headers after import. Exported JSON can be imported directly; only API keys always preserve existing local values.
+Web configuration import preserves the local key and relay token. The browser's same-origin proxy setting becomes a direct connection, with a notice; set `--relay-url` afterward if a relay is needed. CLI exports contain all named profiles but leave keys, relay tokens and extra headers empty. Reconfigure extra headers after import. Exported JSON can be imported directly; API keys and relay tokens preserve existing local values.
 
 ## Queue lifecycle and recovery
 

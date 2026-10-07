@@ -57,7 +57,7 @@ export function SettingsDrawer({ settings, params, onChange, onParams, onClose, 
     reader.onload = () => {
       try {
         const data = importConfig(String(reader.result))
-        if (data.settings) onChange({ ...settings, ...data.settings, apiKey: settings.apiKey })
+        if (data.settings) onChange({ ...settings, ...data.settings, apiKey: settings.apiKey, relayToken: settings.relayToken })
         if (data.params) onParams({ ...params, ...data.params })
         setProbe('配置已导入，密钥未覆盖')
       } catch (err) {
@@ -136,6 +136,12 @@ export function SettingsDrawer({ settings, params, onChange, onParams, onClose, 
             placeholder='{"X-Custom":"value"}'
           />
         </div>
+        {settings.useProxy && (
+          <div className="field">
+            <label htmlFor="relayToken">代理访问令牌（可选）</label>
+            <input id="relayToken" type="password" value={settings.relayToken || ''} onChange={(e) => patch({ relayToken: e.target.value.trim() })} autoComplete="off" />
+          </div>
+        )}
         <div className="row">
           <button className="text-btn" type="button" onClick={() => void probeNow()} disabled={busy}>
             <Check size={14} /> 探测连通

@@ -84,6 +84,12 @@ npm start
 
 `npm start` 会托管 `dist` 并继续提供 `/api/relay`。端口默认 `4173`，可用环境变量 `PORT` 修改。
 
+服务默认只监听 `127.0.0.1`。对外部署需要同时设置 `HOST` 和独立的 `HUITU_RELAY_TOKEN`，然后在网页「中转站」填写代理访问令牌；CLI 使用 `--relay-token`。该令牌与上游 API 密钥互相独立，配置导出会移除令牌及额外请求头。
+
+代理默认拒绝私网、回环、链路本地和保留地址；域名解析后固定连接地址，且不跟随重定向。确需本地或内网中转时，用 `HUITU_RELAY_ALLOWED_HOSTS` 指定允许的精确主机名，以逗号分隔，例如 `127.0.0.1,my-relay.internal`，不支持通配符。修改这些环境变量后重启服务。
+
+代理流式转发请求体，默认请求上限 128 MiB、最多三个并发、请求超时十分钟。可通过 `HUITU_RELAY_MAX_BYTES` 和 `HUITU_RELAY_TIMEOUT_MS` 调整大小和超时。浏览器参考图总量上限 127 MiB，预留请求封装空间。
+
 开发预览（同样带代理）：
 
 ```bash
@@ -126,6 +132,8 @@ GPT Image 模型返回 `b64_json`。同源代理把浏览器请求转到 `/api/r
 | 底片 | IndexedDB：`huitu-prints` |
 | 密钥 | 仅本机，导出配置时留空 |
 
+历史元数据与缩略图、原始 Blob 分开存储，列表只加载缩略图，选择历史时读取原图。旧版历史会逐张迁移。保留最近 80 张或最多 256 MiB 原图；历史保存失败不会丢弃当前成片，仍可下载。
+
 ## 目录
 
 ```
@@ -148,3 +156,5 @@ huitu-web/
 | `npm run preview` | 预览打包结果 |
 | `npm start` | 生产托管 |
 | `npm run lint` | Oxlint |
+| `npm test` | 服务安全、浏览器数据层、CLI 与技能集成测试 |
+| `npm run test:web` | 构建后运行浏览器回归测试；Windows 默认使用已安装的 Edge，可用 `PLAYWRIGHT_CHANNEL` 指定浏览器 |

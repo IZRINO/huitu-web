@@ -16,7 +16,7 @@ export function HistoryRail({ items, currentId, onPick, onDelete }: Props) {
       {items.map((item) => (
         <div key={item.id} className={`strip ${item.id === currentId ? 'is-on' : ''}`}>
           <button type="button" onClick={() => onPick(item)} title={item.prompt.slice(0, 80)}>
-            <img src={item.dataUrl} alt="" />
+            <img src={item.thumbnail} alt="" loading="lazy" />
           </button>
           <button
             type="button"

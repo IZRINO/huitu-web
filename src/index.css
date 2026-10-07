@@ -617,7 +617,9 @@ input, textarea, select {
   height: auto;
   display: block;
   cursor: crosshair;
+  touch-action: none;
 }
+.mask-stage canvas[hidden] { display: none; }
 
 .toasts {
   position: fixed;

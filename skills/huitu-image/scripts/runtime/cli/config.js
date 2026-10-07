@@ -71,7 +71,7 @@ export function validateParams(input) {
 }
 export function validateSettings(input) {
     object(input, 'settings');
-    keys(input, [...Object.keys(defaultSettings()), 'relayUrl'], 'settings');
+    keys(input, [...Object.keys(defaultSettings()), 'relayUrl', 'relayToken'], 'settings');
     for (const [key, value] of Object.entries(input)) {
         if (key === 'useProxy') {
             if (typeof value !== 'boolean')
@@ -176,5 +176,5 @@ export function resolveSpec(config, input) {
     return { name, settings, params, size, apiKeyEnv: merged.apiKeyEnv, images, outputDir: resolve(merged.outputDir ?? config.outputDir) };
 }
 export function publicValue(value) {
-    return JSON.parse(JSON.stringify(value, (key, val) => key === 'apiKey' || key === 'extraHeaders' ? '' : val));
+    return JSON.parse(JSON.stringify(value, (key, val) => ['apiKey', 'relayToken', 'extraHeaders'].includes(key) ? '' : val));
 }

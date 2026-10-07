@@ -1,5 +1,5 @@
 import { describeHttp } from './errors.js';
-import { b64ToDataUrl, blobToDataUrl, joinUrl } from './format.js';
+import { b64ToDataUrl, dataUrlToBlob, joinUrl } from './format.js';
 export function parseExtra(raw) {
     if (!raw.trim())
         return {};
@@ -19,6 +19,8 @@ export async function relayFetch(settings, target, init) {
     if (settings.useProxy) {
         const headers = new Headers(init.headers);
         headers.set('x-relay-url', target);
+        if (settings.relayToken)
+            headers.set('x-relay-token', settings.relayToken);
         if (settings.organization)
             headers.set('x-relay-organization', settings.organization);
         if (Object.keys(extra).length)
@@ -40,27 +42,34 @@ export function authHeaders(apiKey, json = false) {
         h.set('Authorization', `Bearer ${apiKey}`);
     return h;
 }
-async function urlToDataUrl(url) {
+async function urlToBlob(url, signal) {
     if (url.startsWith('data:'))
-        return url;
-    const res = await fetch(url);
+        return dataUrlToBlob(url);
+    const res = await fetch(url, { signal: AbortSignal.any([signal, AbortSignal.timeout(60000)]) });
     if (!res.ok)
         throw new Error('结果地址下载失败');
-    return blobToDataUrl(await res.blob());
+    return res.blob();
 }
-async function collectImages(data, format) {
+async function collectImages(data, format, signal) {
     const images = [];
-    for (const item of data) {
-        if (item.b64_json)
-            images.push({ dataUrl: b64ToDataUrl(item.b64_json, format), b64: item.b64_json });
-        else if (item.result)
-            images.push({ dataUrl: b64ToDataUrl(item.result, format), b64: item.result });
-        else if (item.url)
-            images.push({ dataUrl: await urlToDataUrl(item.url) });
+    try {
+        for (const item of data) {
+            signal.throwIfAborted();
+            const raw = item.b64_json || item.result;
+            const blob = raw ? dataUrlToBlob(b64ToDataUrl(raw, format)) : item.url ? await urlToBlob(item.url, signal) : null;
+            signal.throwIfAborted();
+            if (blob)
+                images.push({ blob, dataUrl: URL.createObjectURL(blob) });
+        }
+        if (!images.length)
+            throw new Error('中转站没有返回图片');
+        return images;
     }
-    if (!images.length)
-        throw new Error('中转站没有返回图片');
-    return images;
+    catch (error) {
+        for (const image of images)
+            URL.revokeObjectURL(image.dataUrl);
+        throw error;
+    }
 }
 async function readSse(res, format, onPartial) {
     if (!res.body)
@@ -155,9 +164,9 @@ export async function parseResponse(res, format, stream, onPartial) {
         throw new Error('No images returned');
     return payload;
 }
-async function browserResult(payload, format) {
+async function browserResult(payload, format, signal) {
     return {
-        images: await collectImages(payload.data ?? [], format),
+        images: await collectImages(payload.data ?? [], payload.output_format || format, signal),
         usage: payload.usage,
         size: payload.size,
         quality: payload.quality,
@@ -208,10 +217,12 @@ export async function requestImages(settings, body, handlers) {
     return parseResponse(res, body.output_format, body.stream, handlers.onPartial);
 }
 export async function generateImage(settings, body, handlers) {
-    return browserResult(await requestImages(settings, body, handlers), body.output_format);
+    const signal = AbortSignal.any([handlers.signal, AbortSignal.timeout(600000)]);
+    return browserResult(await requestImages(settings, body, { ...handlers, signal }), body.output_format, signal);
 }
 export async function editImage(settings, body, handlers) {
-    return browserResult(await requestImages(settings, body, handlers), body.output_format);
+    const signal = AbortSignal.any([handlers.signal, AbortSignal.timeout(600000)]);
+    return browserResult(await requestImages(settings, body, { ...handlers, signal }), body.output_format, signal);
 }
 export async function testRelay(settings) {
     if (!settings.baseUrl.trim())

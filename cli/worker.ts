@@ -29,10 +29,11 @@ export async function runWorker(home: string) {
       const secrets: string[] = actualKey ? [actualKey] : []
       for (const p of [config.defaults, ...Object.values(config.profiles)]) {
         if (p.settings?.apiKey) secrets.push(p.settings.apiKey)
+        if (p.settings?.relayToken) secrets.push(p.settings.relayToken)
         if (p.apiKeyEnv && environment[p.apiKeyEnv]) secrets.push(environment[p.apiKeyEnv]!)
         if (p.settings?.extraHeaders) secrets.push(...Object.values(parseExtra(p.settings.extraHeaders)))
       }
-      if (job) { secrets.push(keyFor(job.profile, job.apiKeyEnv)); secrets.push(...Object.values(parseExtra(job.settings.extraHeaders))) }
+      if (job) { secrets.push(keyFor(job.profile, job.apiKeyEnv), job.settings.relayToken || ''); secrets.push(...Object.values(parseExtra(job.settings.extraHeaders))) }
       for (const secret of secrets.filter(Boolean).sort((a, b) => b.length - a.length)) message = message.split(secret).join('[REDACTED]')
       return message.slice(0, 2000)
     }
@@ -48,13 +49,16 @@ export async function runWorker(home: string) {
     async function execute(job: Job, controller: AbortController) {
       let phase = job.status === 'downloading' ? 'download' : 'generation'
       let apiKey = ''
+      let relayToken = job.settings.relayToken || ''
       try {
         let response: ImagesResponse
         if (job.status === 'downloading') response = await readJson(join(jobDir(home, job.id), 'response.json'))
         else {
           job.status = 'running'; job.startedAt = new Date().toISOString(); await saveJob(job)
           controller.signal.throwIfAborted()
-          apiKey = (await readJson<{ apiKey: string }>(join(jobDir(home, job.id), 'credentials.json'))).apiKey
+          const credentials = await readJson<{ apiKey: string; relayToken?: string }>(join(jobDir(home, job.id), 'credentials.json'))
+          apiKey = credentials.apiKey
+          relayToken = credentials.relayToken || relayToken
           if (!apiKey) throw new CliError('Missing API key; configure profile or restart worker with its key environment variable', 'MISSING_CREDENTIALS', 1)
           const p = job.params
           const body: GenerateBody = { prompt: job.prompt, model: job.settings.model, size: job.size, n: p.n,
@@ -62,7 +66,7 @@ export async function runWorker(home: string) {
             moderation: p.moderation, stream: p.stream, partial_images: p.partialImages }
           const request = job.mode === 'edit' ? { ...body, images: await Promise.all(job.images.map(imageFile)),
             mask: job.mask ? await imageFile(job.mask) : undefined, input_fidelity: p.fidelity } : body
-          response = await requestImages({ ...job.settings, apiKey }, request, {
+          response = await requestImages({ ...job.settings, apiKey, relayToken }, request, {
             signal: AbortSignal.any([controller.signal, AbortSignal.timeout(job.generationTimeout * 1000)]),
           })
           controller.signal.throwIfAborted()
@@ -95,7 +99,8 @@ export async function runWorker(home: string) {
       } catch (error) {
         if (job.status !== 'cancelled') {
           job.status = 'failed'
-          job.error = { code: error instanceof CliError ? error.code : phase === 'download' ? 'DOWNLOAD_FAILED' : 'GENERATION_FAILED', message: scrub(messageOf(error), job, apiKey), phase }
+          const safeMessage = relayToken ? messageOf(error).split(relayToken).join('[REDACTED]') : messageOf(error)
+          job.error = { code: error instanceof CliError ? error.code : phase === 'download' ? 'DOWNLOAD_FAILED' : 'GENERATION_FAILED', message: scrub(safeMessage, job, apiKey), phase }
         }
         job.finishedAt = new Date().toISOString()
         await saveJob(job)
@@ -120,7 +125,7 @@ export async function runWorker(home: string) {
       if (stopping) throw new CliError('Worker is stopping', 'WORKER_STOPPING', 1)
       const spec = input as JobSpec
       const resolved = resolveSpec(config, input)
-      const credentials = parent ? await readJson<{ apiKey: string }>(join(jobDir(home, parent.id), 'credentials.json')) : { apiKey: keyFor(resolved.name, resolved.apiKeyEnv) }
+      const credentials = parent ? await readJson<{ apiKey: string; relayToken?: string }>(join(jobDir(home, parent.id), 'credentials.json')) : { apiKey: keyFor(resolved.name, resolved.apiKeyEnv), relayToken: resolved.settings.relayToken || '' }
       if (!credentials.apiKey) throw new CliError('Missing API key; configure profile or restart worker with its key environment variable', 'MISSING_CREDENTIALS')
       for (const path of resolved.images) await checkInput(path)
       if (spec.mask) await checkInput(spec.mask, true)
@@ -130,13 +135,13 @@ export async function runWorker(home: string) {
         const staged = await stageInputs(dir, resolved.images, spec.mask)
         await atomicJson(join(dir, 'credentials.json'), credentials)
         const job: Job = { id, sequence: ++sequence, status: 'queued', mode: spec.mode, prompt: spec.prompt.trim(),
-          profile: resolved.name, settings: { ...resolved.settings, apiKey: '' }, apiKeyEnv: resolved.apiKeyEnv,
+          profile: resolved.name, settings: { ...resolved.settings, apiKey: '', relayToken: '' }, apiKeyEnv: resolved.apiKeyEnv,
           params: resolved.params, size: resolved.size, ...staged, outputDir: join(resolved.outputDir, id),
           generationTimeout: config.generationTimeout, downloadTimeout: config.downloadTimeout,
           createdAt: new Date().toISOString(), files: [] }
         if (parent) {
           job.parentId = parent.id
-          job.settings = { ...parent.settings }; job.params = { ...parent.params }; job.size = parent.size
+          job.settings = { ...parent.settings, relayToken: '' }; job.params = { ...parent.params }; job.size = parent.size
           job.apiKeyEnv = parent.apiKeyEnv
           if (await stat(join(jobDir(home, parent.id), 'response.json')).then(() => true, () => false)) {
             const response = await readJson(join(jobDir(home, parent.id), 'response.json'))
@@ -171,14 +176,14 @@ export async function runWorker(home: string) {
           if (imported.version === 1) {
             validateConfig(imported)
             const next: Config = structuredClone(imported)
-            for (const [name, profile] of Object.entries(next.profiles)) profile.settings = { ...profile.settings, apiKey: config.profiles[name]?.settings?.apiKey || '' }
-            next.defaults.settings = { ...next.defaults.settings, apiKey: config.defaults.settings?.apiKey || '' }
+            for (const [name, profile] of Object.entries(next.profiles)) profile.settings = { ...profile.settings, apiKey: config.profiles[name]?.settings?.apiKey || '', relayToken: config.profiles[name]?.settings?.relayToken || '' }
+            next.defaults.settings = { ...next.defaults.settings, apiKey: config.defaults.settings?.apiKey || '', relayToken: config.defaults.settings?.relayToken || '' }
             return saveConfig(next)
           }
           const profile = { settings: imported.settings ?? {}, params: imported.params ?? {} }
           validateProfile(profile)
           const name = String(args.profile || config.defaultProfile); profileName(name)
-          const settings = { ...profile.settings, useProxy: false, apiKey: config.profiles[name]?.settings?.apiKey || '' }
+          const settings = { ...profile.settings, useProxy: false, apiKey: config.profiles[name]?.settings?.apiKey || '', relayToken: config.profiles[name]?.settings?.relayToken || '' }
           return saveConfig({ ...config, profiles: { ...config.profiles, [name]: mergeProfile(config.profiles[name] ?? {}, { ...profile, settings }) } })
         }
         case 'profile.set': {

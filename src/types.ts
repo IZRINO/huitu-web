@@ -12,6 +12,7 @@ export interface Settings {
   model: string
   useProxy: boolean
   relayUrl?: string
+  relayToken?: string
   extraHeaders: string
   organization: string
 }
@@ -46,7 +47,7 @@ export interface Usage {
 
 export interface GenImage {
   dataUrl: string
-  b64?: string
+  blob: Blob
 }
 
 export interface GenResult {
@@ -69,7 +70,8 @@ export interface PrintRecord {
   background: string
   format: string
   n: number
-  dataUrl: string
+  thumbnail: string
+  bytes?: number
   usage?: Usage
 }
 

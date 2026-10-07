@@ -85,7 +85,6 @@ export function SettingsDrawer({ settings, params, onChange, onParams, onClose, 
             placeholder="https://api.openai.com/v1"
             autoComplete="off"
           />
-          <span className="okhint">填到 /v1 这一级。出图走 /images/generations，改图走 /images/edits。</span>
         </div>
         <form
           className="field"
@@ -125,7 +124,7 @@ export function SettingsDrawer({ settings, params, onChange, onParams, onClose, 
             checked={settings.useProxy}
             onChange={(e) => patch({ useProxy: e.target.checked })}
           />
-          同源代理（避开浏览器跨域）
+          同源代理
         </label>
         <div className="field">
           <label htmlFor="headers">额外请求头 JSON</label>
@@ -154,7 +153,7 @@ export function SettingsDrawer({ settings, params, onChange, onParams, onClose, 
           </button>
         </div>
         {probe && <p className="okhint">{probe}</p>}
-        <button className="text-btn" type="button" onClick={onClearHistory}>
+        <button className="text-btn danger-btn" type="button" onClick={onClearHistory}>
           清空底片
         </button>
         <input

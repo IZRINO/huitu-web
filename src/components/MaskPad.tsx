@@ -163,7 +163,6 @@ export function MaskPad({ src, onMask }: Props) {
           <Trash size={14} /> 清空
         </button>
       </div>
-      <p className="okhint">透明处会被改写，未涂区域保持原样。</p>
       <div className="mask-stage">
         <canvas
           ref={viewRef}

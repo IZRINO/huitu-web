@@ -2,12 +2,16 @@ import {
   Copy,
   DownloadSimple,
   Drop,
+  ArrowUpRight,
+  ArrowsLeftRight,
+  FrameCorners,
   GearSix,
   Image as ImageIcon,
   PaintBrush,
   Plus,
   Stop,
   UploadSimple,
+  X,
 } from '@phosphor-icons/react'
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { HistoryRail } from './components/HistoryRail'
@@ -112,7 +116,7 @@ export default function App() {
     revokeImages(variantsRef.current)
     variantsRef.current = next
     setVariants(next)
-    setMask(null)
+    if (!refsRef.current.length) setMask(null)
   }
 
   function replaceRefs(next: RefImage[]) {
@@ -176,11 +180,11 @@ export default function App() {
     if (abortRef.current) return
     const text = prompt.trim()
     if (!text) {
-      toast('err', '先写配方')
+      toast('err', '请输入提示词')
       return
     }
     if (text.length > 32000) {
-      toast('err', '配方超过 32000 字')
+      toast('err', '提示词超过 32000 字')
       return
     }
     if (!sizeCheck.ok) {
@@ -193,12 +197,12 @@ export default function App() {
       images = [imageToFile(blob, 'plate.png')]
     }
     if (mode === 'edit' && images.length === 0) {
-      toast('err', '改图需要底图，拖一张进来或先出图')
+      toast('err', '请添加参考图或选择已有图像')
       return
     }
     if (!ready) {
       setOpenSet(true)
-      toast('info', '先接通中转站')
+      toast('info', '请配置中转站')
       return
     }
     const ctrl = new AbortController()
@@ -233,9 +237,9 @@ export default function App() {
       setVariantI(0)
       setPartial(null)
       try { await persist(result.images, text, result.size || size) }
-      catch (err) { toast('err', `成片已生成，历史保存失败：${describeError(err)}`) }
+      catch (err) { toast('err', `图像已生成，历史保存失败：${describeError(err)}`) }
       const line = usageLine(result.usage)
-      toast('ok', line ? `成片 · ${line}` : '成片')
+      toast('ok', line ? `生成完成 · ${line}` : '生成完成')
     } catch (err) {
       toast('err', describeError(err))
     } finally {
@@ -307,7 +311,7 @@ export default function App() {
     const ref = { id: uid(), file, url: URL.createObjectURL(file) }
     replaceRefs([ref, ...refsRef.current].slice(0, 16))
     setMode('edit')
-    toast('info', '当前片已落成底图')
+    toast('info', '已添加为参考图')
   }
 
   useEffect(() => {
@@ -341,19 +345,18 @@ export default function App() {
 
   return (
     <div className="app">
-      <div className="grain" />
       <header className="top">
         <div className="mark">
-          <span className="mark-sun" aria-hidden />
+          <span className="brand-icon"><FrameCorners size={22} weight="bold" /></span>
           <div className="word">
             绘途
-            <small>蓝晒工坊</small>
+            <small>图像工作台</small>
           </div>
         </div>
+        <span className="workspace-label">创作空间</span>
         <div className="top-status">
-          <span className={`dot ${ready ? 'on' : ''}`} />
-          <span className="model-name">{ready ? settings.model : '未接通'}</span>
-          <button className="text-btn settings-btn" type="button" onClick={() => setOpenSet(true)}>
+          <span className="connection-status"><span className={`dot ${ready ? 'on' : ''}`} /><span className="model-name">{ready ? settings.model : '未接通'}</span></span>
+          <button className="text-btn settings-btn" type="button" title="中转站设置" aria-label="中转站" onClick={() => setOpenSet(true)}>
             <GearSix size={16} /> <span className="btn-label">中转站</span>
           </button>
         </div>
@@ -362,8 +365,16 @@ export default function App() {
       <HistoryRail items={prints} currentId={current?.id ?? null} onPick={(item) => void pickPrint(item)} onDelete={(id) => void dropPrint(id)} />
 
       <main className="stage">
+        <div className="stage-toolbar">
+          <div className="canvas-heading"><ImageIcon size={16} /><span>图像预览</span><span className="canvas-size">{current?.size || size}</span></div>
+          <div className="canvas-actions">
+            <button className="icon-btn" type="button" onClick={() => fileRef.current?.click()} title="添加参考图" aria-label="添加参考图"><Plus size={18} /></button>
+            <button className="icon-btn" type="button" onClick={() => void copyImg()} disabled={!frame} title="复制图像" aria-label="复制"><Copy size={18} /></button>
+            <button className="icon-btn" type="button" onClick={download} disabled={!frame} title="下载图像" aria-label="下载"><DownloadSimple size={18} /></button>
+          </div>
+        </div>
         <div
-          className="sheet-wrap"
+          className={`sheet-wrap ${over ? 'is-over' : ''}`}
           onDragOver={(e) => {
             e.preventDefault()
             setOver(true)
@@ -382,34 +393,36 @@ export default function App() {
             {frame ? (
               compare && refs[0] ? (
                 <div className="compare" style={{ ['--split' as string]: `${split}%` }}>
-                  <img src={refs[0].url} alt="" />
-                  <img className="after" src={frame} alt="" />
+                  <img src={refs[0].url} alt="参考图" />
+                  <img className="after" src={frame} alt="编辑结果" />
                   <input
                     className="compare-range"
                     type="range"
                     min={0}
                     max={100}
                     value={split}
+                    aria-label="对照位置"
                     onChange={(e) => setSplit(Number(e.target.value))}
                   />
                 </div>
               ) : (
-                <img className="frame" src={frame} alt="当前成片" />
+                <img className="frame" src={frame} alt="当前图像" />
               )
             ) : (
               <div className="watermark">
                 <div>
-                  <h1>等待曝光</h1>
-                  <p>{over ? '松开即作底图' : '配方写在下面，日光从右下角来'}</p>
+                  <FrameCorners size={38} weight="thin" />
+                  <h1>{over ? '添加参考图' : '新画布'}</h1>
+                  <p>{size === 'auto' ? '自动尺寸' : size.replace('x', ' × ')}</p>
                 </div>
               </div>
             )}
-            {running && <div className="busy">{partial ? '显影中' : '曝光中'}</div>}
+            {running && <div className="busy"><span className="loading-dot" />{partial ? '显影中' : '生成中'}</div>}
             {variants.length > 1 && (
               <div className="variants">
                 {variants.map((v, i) => (
-                  <button key={v.dataUrl} className={i === variantI ? 'is-on' : ''} type="button" onClick={() => { setVariantI(i); setMask(null) }}>
-                    <img src={v.dataUrl} alt="" />
+                  <button key={v.dataUrl} className={i === variantI ? 'is-on' : ''} type="button" title={`选择第 ${i + 1} 张图像`} aria-label={`选择第 ${i + 1} 张图像`} onClick={() => { setVariantI(i); if (!refsRef.current.length) setMask(null) }}>
+                    <img src={v.dataUrl} alt={`结果 ${i + 1}`} />
                   </button>
                 ))}
               </div>
@@ -418,46 +431,44 @@ export default function App() {
         </div>
 
         <div className="prompt-dock">
-          <div>
-            <div className="chips">
+          <div className="prompt-heading"><label htmlFor="prompt">提示词</label><span>灵感</span><div className="chips template-chips">
               {TEMPLATES.map((t) => (
                 <button key={t.id} className="chip" type="button" onClick={() => setPrompt(t.text)}>
                   {t.label}
                 </button>
               ))}
-            </div>
+          </div></div>
+          <div className="prompt-input">
             <textarea
+              id="prompt"
               value={prompt}
               onChange={(e) => setPrompt(e.target.value)}
-              placeholder="配方。写主体、光线、背景、不要什么。Ctrl+Enter 曝光。"
+              placeholder="描述你想创作的图像..."
               maxLength={32000}
             />
-            <div className="prompt-meta">
-              <span>{mode === 'edit' ? '水洗' : '出图'}</span>
-              <span>{prompt.length} / 32000</span>
-            </div>
           </div>
-          <div className="sun-wrap">
+          <div className="prompt-footer">
+            <div className="prompt-meta"><span>{mode === 'edit' ? '图像编辑' : '图像生成'}</span><span>{prompt.length.toLocaleString()} / 32,000</span></div>
+            <div className="generate-actions">
+            {running && <button className="icon-btn abort" type="button" title="中止生成" aria-label="中止" onClick={() => abortRef.current?.abort()}><Stop size={16} /></button>}
             <button
-              className={`sun ${running ? 'is-hot' : ''}`}
+              className="generate-btn"
               type="button"
               onClick={() => void expose()}
               disabled={running}
             >
-              {mode === 'edit' ? '水洗' : '曝光'}
+              {mode === 'edit' ? '应用编辑' : '生成图像'}
+              <ArrowUpRight size={18} />
             </button>
-            {running && (
-              <button className="text-btn abort" type="button" onClick={() => abortRef.current?.abort()}>
-                <Stop size={14} /> 中止
-              </button>
-            )}
+            </div>
           </div>
         </div>
       </main>
 
       <aside className="console">
+        <div className="console-heading"><GearSix size={16} /><h2>图像设置</h2></div>
         <div className="tray">
-          <h2>工序</h2>
+          <h2>模式</h2>
           <div className="seg">
             <button className={mode === 'generate' ? 'is-on' : ''} type="button" onClick={() => setMode('generate')}>
               出图
@@ -549,18 +560,12 @@ export default function App() {
         </div>
 
         <div className="tray">
-          <h2>感光</h2>
-          <div className="chips">
-            {QUALITIES.map((q) => (
-              <button key={q} className={`chip ${params.quality === q ? 'is-on' : ''}`} type="button" onClick={() => patchParams({ quality: q })}>
-                {q}
-              </button>
-            ))}
-          </div>
+          <h2>质量与数量</h2>
+          <label className="field"><span>图像质量</span><select aria-label="图像质量" value={params.quality} onChange={(e) => patchParams({ quality: e.target.value as Quality })}>{QUALITIES.map(q => <option key={q} value={q}>{{ auto: '自动', low: '低', medium: '中', high: '高', xhigh: '超高', max: '最高' }[q]}</option>)}</select></label>
           <div className="row">
             <label className="field" style={{ flex: 1 }}>
-              <span>张数 {params.n}</span>
-              <input type="range" min={1} max={10} value={params.n} onChange={(e) => patchParams({ n: Number(e.target.value) })} />
+              <span className="range-label">图像数量 <strong>{params.n}</strong></span>
+              <input aria-label="图像数量" type="range" min={1} max={10} value={params.n} onChange={(e) => patchParams({ n: Number(e.target.value) })} />
             </label>
           </div>
         </div>
@@ -620,7 +625,7 @@ export default function App() {
 
         {mode === 'edit' && (
           <div className="tray">
-            <h2>底图</h2>
+            <h2>参考图 <span className="section-count">{refs.length} / 16</span></h2>
             <div className="seg">
               {(['high', 'low'] as const).map((f) => (
                 <button key={f} className={params.fidelity === f ? 'is-on' : ''} type="button" onClick={() => patchParams({ fidelity: f })}>
@@ -628,8 +633,9 @@ export default function App() {
                 </button>
               ))}
             </div>
-            <div
+            <button
               className={`drop ${over ? 'is-over' : ''}`}
+              type="button"
               onClick={() => fileRef.current?.click()}
               onDragOver={(e) => {
                 e.preventDefault()
@@ -642,14 +648,14 @@ export default function App() {
               }}
             >
               <UploadSimple size={18} />
-              拖入 / 粘贴 / 点击，最多 16 张
-            </div>
+              添加参考图
+            </button>
             <div className="refs">
               {refs.map((r) => (
                 <div className="ref" key={r.id}>
-                  <img src={r.url} alt="" />
-                  <button className="kill icon-btn" type="button" onClick={() => removeRef(r.id)} aria-label="移除">
-                    ×
+                  <img src={r.url} alt={r.file.name} />
+                  <button className="kill icon-btn" type="button" title="移除参考图" onClick={() => removeRef(r.id)} aria-label="移除">
+                    <X size={12} />
                   </button>
                 </div>
               ))}
@@ -662,27 +668,13 @@ export default function App() {
                 <PaintBrush size={14} /> {showMask ? '收起蒙版' : '涂蒙版'}
               </button>
               <button className="text-btn" type="button" onClick={() => setCompare((v) => !v)} disabled={!frame || !refs[0]}>
+                <ArrowsLeftRight size={14} />
                 对照
               </button>
             </div>
             {showMask && maskSrc && <MaskPad key={maskSrc} src={maskSrc} onMask={(blob) => setMask(blob ? { src: maskSrc, blob } : null)} />}
           </div>
         )}
-
-        <div className="tray">
-          <h2>定影</h2>
-          <div className="row">
-            <button className="text-btn" type="button" onClick={download} disabled={!frame}>
-              <DownloadSimple size={14} /> 下载
-            </button>
-            <button className="text-btn" type="button" onClick={() => void copyImg()} disabled={!frame}>
-              <Copy size={14} /> 复制
-            </button>
-            <button className="text-btn" type="button" onClick={() => fileRef.current?.click()}>
-              <Plus size={14} /> 加图
-            </button>
-          </div>
-        </div>
 
         <p className="usage">
           <Drop size={12} /> {settings.model} · {size}
@@ -712,8 +704,8 @@ export default function App() {
         />
       )}
 
-      <div className="toasts">
-        {toasts.map((t) => (
+      <div className="toasts" role="status" aria-live="polite">
+        {toasts.slice(-2).map((t) => (
           <div key={t.id} className={`toast ${t.kind}`}>
             {t.text}
           </div>

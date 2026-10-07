@@ -43,21 +43,25 @@ async function migrateLegacy(db: IDBDatabase): Promise<void> {
   for (const key of keys) {
     const legacy = await requestValue(db.transaction(STORE).objectStore(STORE).get(key)) as PrintRecord & { dataUrl?: string }
     if (!legacy?.dataUrl) continue
-    const blob = dataUrlToBlob(legacy.dataUrl)
+    let blob: Blob | undefined
     let preview: string
-    try { preview = await thumbnail(blob) } catch {
+    try {
+      blob = dataUrlToBlob(legacy.dataUrl)
+      preview = await thumbnail(blob)
+    } catch {
       const canvas = document.createElement('canvas')
       canvas.width = 1; canvas.height = 1
       preview = canvas.toDataURL('image/png')
     }
-    const record = { ...legacy, thumbnail: preview, bytes: blob.size }
+    const record = { ...legacy, thumbnail: preview, bytes: blob?.size ?? new Blob([legacy.dataUrl]).size }
     delete record.dataUrl
     const tx = db.transaction([STORE, IMAGES], 'readwrite')
     const current = tx.objectStore(STORE).get(key)
     current.onsuccess = () => {
       if (!current.result?.dataUrl) return
       tx.objectStore(STORE).put(record)
-      tx.objectStore(IMAGES).put({ id: record.id, blob })
+      // Keep undecodable originals outside the metadata list so they remain removable.
+      tx.objectStore(IMAGES).put(blob ? { id: record.id, blob } : { id: record.id, dataUrl: legacy.dataUrl })
     }
     await txDone(tx)
   }
@@ -96,7 +100,7 @@ export async function listPrints(): Promise<PrintRecord[]> {
 
 export async function getPrint(id: string): Promise<Blob | null> {
   const db = await openDb()
-  const image = await requestValue(db.transaction(IMAGES).objectStore(IMAGES).get(id)) as { blob: Blob } | undefined
+  const image = await requestValue(db.transaction(IMAGES).objectStore(IMAGES).get(id)) as { blob?: Blob } | undefined
   return image?.blob || null
 }
 

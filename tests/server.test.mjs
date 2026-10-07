@@ -6,22 +6,24 @@ import { once } from 'node:events'
 import { setTimeout as delay } from 'node:timers/promises'
 import { publicAddress, targetAddress } from '../server/relay.mjs'
 
-async function serve(t, env = {}) {
+async function serve(t, env = {}, nodeArgs = []) {
   const reservation = createServer()
   await new Promise(resolve => reservation.listen(0, '127.0.0.1', resolve))
   const port = reservation.address().port
   await new Promise(resolve => reservation.close(resolve))
-  const child = spawn(process.execPath, ['server.mjs'], {
+  const child = spawn(process.execPath, [...nodeArgs, 'server.mjs'], {
     env: { ...process.env, HOST: '127.0.0.1', PORT: String(port), HUITU_RELAY_TOKEN: 'audit-token', HUITU_RELAY_ALLOWED_HOSTS: '', ...env },
     stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
   })
   let stderr = ''
+  let stdout = ''
+  child.stdout.on('data', chunk => { stdout += chunk })
   child.stderr.on('data', chunk => { stderr += chunk })
   t.after(async () => {
     if (child.exitCode === null) { child.kill(); await once(child, 'exit') }
   })
   await Promise.race([once(child.stdout, 'data'), once(child, 'exit').then(() => { throw new Error(stderr) }), delay(5000).then(() => { throw new Error('Server startup timeout') })])
-  return { port, child, get: (path, headers = {}, method = 'GET', body) => new Promise((resolve, reject) => {
+  return { port, child, stdout: () => stdout, get: (path, headers = {}, method = 'GET', body) => new Promise((resolve, reject) => {
     const req = request({ hostname: '127.0.0.1', port, path, method, headers }, res => {
       const chunks = []
       res.on('data', chunk => chunks.push(chunk))
@@ -139,4 +141,42 @@ test('relay timeout closes a stalled upstream and releases the slot', async t =>
   const server = await serve(t, { HUITU_RELAY_ALLOWED_HOSTS: '127.0.0.1', HUITU_RELAY_TIMEOUT_MS: '100' })
   assert.equal((await server.get('/api/relay', { 'x-relay-url': target, 'x-relay-token': 'audit-token' })).status, 504)
   assert.equal((await server.get('/')).status, 200)
+})
+
+async function waitForLookups(server, count) {
+  for (let i = 0; i < 40; i++) {
+    if ((server.stdout().match(/DNS lookup started/g) || []).length >= count) return
+    await delay(25)
+  }
+  assert.fail('Pending DNS lookups did not start')
+}
+
+test('DNS timeout releases relay slots before the lookup completes', async t => {
+  const target = await upstream(t, (_req, res) => res.end('available'))
+  const server = await serve(t, { HUITU_RELAY_ALLOWED_HOSTS: '127.0.0.1', HUITU_RELAY_TIMEOUT_MS: '100' }, ['--import', './tests/fixtures/delayed-dns.mjs'])
+  const headers = { 'x-relay-url': 'http://pending.invalid/v1/models', 'x-relay-token': 'audit-token' }
+  let completed = 0
+  const pending = Promise.all(Array.from({ length: 3 }, () => server.get('/api/relay', headers).then(result => { completed++; return result.status })))
+  await waitForLookups(server, 3)
+  await delay(250)
+  assert.equal(completed, 3, 'DNS wait must finish at the relay deadline')
+  assert.deepEqual(await pending, [504, 504, 504])
+  assert.equal((await server.get('/api/relay', { ...headers, 'x-relay-url': target })).status, 200)
+})
+
+test('client disconnect releases relay slots while DNS is pending', async t => {
+  const target = await upstream(t, (_req, res) => res.end('available'))
+  const server = await serve(t, { HUITU_RELAY_ALLOWED_HOSTS: '127.0.0.1', HUITU_RELAY_TIMEOUT_MS: '5000' }, ['--import', './tests/fixtures/delayed-dns.mjs'])
+  const headers = { 'x-relay-url': 'http://pending.invalid/v1/models', 'x-relay-token': 'audit-token' }
+  const pending = Array.from({ length: 3 }, () => {
+    const req = request({ hostname: '127.0.0.1', port: server.port, path: '/api/relay', headers })
+    req.on('error', () => undefined)
+    req.end()
+    return req
+  })
+  t.after(() => pending.forEach(req => req.destroy()))
+  await waitForLookups(server, 3)
+  pending.forEach(req => req.destroy())
+  await delay(100)
+  assert.equal((await server.get('/api/relay', { ...headers, 'x-relay-url': target })).status, 200)
 })

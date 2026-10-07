@@ -18,6 +18,27 @@ test('web config import rejects invalid parameter types and ranges', async t => 
   }
 })
 
+test('inactive size presets do not reset valid params or prevent config import', async t => {
+  const load = await browserModules(t)
+  const { exportConfig, importConfig, loadParams } = await load('storage')
+  const { defaultSettings, defaultParams } = await load('defaults')
+  const { resolveSize, validateSize } = await load('size')
+  const original = Object.getOwnPropertyDescriptor(globalThis, 'localStorage')
+  t.after(() => {
+    if (original) Object.defineProperty(globalThis, 'localStorage', original)
+    else delete globalThis.localStorage
+  })
+  for (const sizeMode of ['aspect', 'custom', 'auto']) {
+    const params = { ...defaultParams(), sizeMode, sizePreset: '1920x1080', aspect: '16:9', longEdge: 2048, quality: 'high', n: 3 }
+    assert.ok(validateSize(resolveSize(params)).ok)
+    Object.defineProperty(globalThis, 'localStorage', { configurable: true, value: { getItem: () => JSON.stringify(params) } })
+    assert.deepEqual(loadParams(), params)
+    assert.deepEqual(importConfig(exportConfig(defaultSettings(), params)).params, params)
+  }
+  assert.throws(() => importConfig(JSON.stringify({ params: { sizeMode: 'preset', sizePreset: '1920x1080' } })))
+  assert.throws(() => importConfig(JSON.stringify({ params: { sizeMode: 'auto', sizePreset: {} } })))
+})
+
 test('cancellation interrupts browser result URL downloads', async t => {
   const load = await browserModules(t)
   const { generateImage } = await load('api')

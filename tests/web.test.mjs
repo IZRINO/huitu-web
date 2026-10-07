@@ -6,7 +6,7 @@ import { once } from 'node:events'
 import { mkdir } from 'node:fs/promises'
 import { chromium } from 'playwright'
 
-test('browser: legacy history, Blob storage, reference cleanup, masks and responsive layout', { timeout: 90000 }, async t => {
+async function browserApp(t) {
   const reservation = createServer()
   await new Promise(resolve => reservation.listen(0, '127.0.0.1', resolve))
   const port = reservation.address().port
@@ -18,6 +18,11 @@ test('browser: legacy history, Blob storage, reference cleanup, masks and respon
   t.after(() => browser.close())
   const context = await browser.newContext({ viewport: { width: 1440, height: 900 } })
   const page = await context.newPage()
+  return { context, page, port }
+}
+
+test('browser: legacy history, Blob storage, reference cleanup, masks and responsive layout', { timeout: 90000 }, async t => {
+  const { context, page, port } = await browserApp(t)
   const errors = []
   page.on('pageerror', error => errors.push(error.message))
   await page.route(`http://127.0.0.1:${port}/audit-seed`, route => route.fulfill({ contentType: 'text/html', body: '<html><body></body></html>' }))
@@ -49,7 +54,7 @@ test('browser: legacy history, Blob storage, reference cleanup, masks and respon
   })
   const requests = []
   await page.route('https://audit.invalid/**', async route => {
-    requests.push({ url: route.request().url(), body: route.request().postDataBuffer() })
+    requests.push({ url: route.request().url(), body: route.request().postDataBuffer(), contentType: route.request().headers()['content-type'] })
     await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ data: [{ b64_json: png }] }) })
   })
   await page.goto(`http://127.0.0.1:${port}`)
@@ -57,7 +62,7 @@ test('browser: legacy history, Blob storage, reference cleanup, masks and respon
   await page.locator('.strip > button').first().click()
   await page.locator('img.frame').waitFor()
   await page.locator('.prompt-dock textarea').fill('audit')
-  await page.getByRole('button', { name: '曝光', exact: true }).click()
+  await page.getByRole('button', { name: '生成图像', exact: true }).click()
   await page.waitForFunction(() => document.querySelector('.rail-head')?.textContent.includes('2'))
   const stored = await page.evaluate(async () => {
     const db = await new Promise(resolve => { const r = indexedDB.open('huitu-prints'); r.onsuccess = () => resolve(r.result) })
@@ -91,19 +96,30 @@ test('browser: legacy history, Blob storage, reference cleanup, masks and respon
   await page.mouse.down(); await page.mouse.up()
   await page.waitForTimeout(100)
   assert.equal(await page.evaluate(() => window.auditReadbacks), 0)
-  await page.getByRole('button', { name: '水洗', exact: true }).click()
+  await page.getByRole('button', { name: '应用编辑', exact: true }).click()
   await page.waitForFunction(() => document.querySelector('.rail-head')?.textContent.includes('3'))
   assert.ok(requests.at(-1).body.toString().includes('name="mask"'), requests.at(-1).body.toString())
+  const firstForm = await new Response(requests.at(-1).body, { headers: { 'Content-Type': requests.at(-1).contentType } }).formData()
+  const firstMask = await firstForm.get('mask').arrayBuffer()
+  await page.getByRole('button', { name: '应用编辑', exact: true }).click()
+  await page.waitForFunction(() => document.querySelector('.rail-head')?.textContent.includes('4'))
+  assert.ok(requests.at(-1).body.toString().includes('name="mask"'), 'Repeated edits on the same reference must retain the painted mask')
+  const repeatedForm = await new Response(requests.at(-1).body, { headers: { 'Content-Type': requests.at(-1).contentType } }).formData()
+  assert.deepEqual(await repeatedForm.get('mask').arrayBuffer(), firstMask)
   await page.getByRole('button', { name: '收起蒙版', exact: true }).click()
   await page.getByRole('button', { name: '移除', exact: true }).click()
   const upload = page.locator('input[type=file][accept="image/png,image/jpeg,image/webp"]')
   await upload.setInputFiles({ name: 'second.png', mimeType: 'image/png', buffer: Buffer.from(png, 'base64') })
-  await page.getByRole('button', { name: '水洗', exact: true }).click()
-  await page.waitForFunction(() => document.querySelector('.rail-head')?.textContent.includes('4'))
+  await page.getByRole('button', { name: '应用编辑', exact: true }).click()
+  await page.waitForFunction(() => document.querySelector('.rail-head')?.textContent.includes('5'))
   assert.equal(requests.at(-1).body.toString().includes('name="mask"'), false)
   await upload.setInputFiles(Array.from({ length: 20 }, (_, index) => ({ name: `ref${index}.png`, mimeType: 'image/png', buffer: Buffer.from(png, 'base64') })))
   assert.equal(await page.locator('.ref').count(), 16)
   assert.equal(await page.evaluate(() => window.auditUrls.size), 17)
+  assert.ok(await page.locator('.sheet').evaluate(element => {
+    const bounds = element.getBoundingClientRect()
+    return Math.abs(bounds.width / bounds.height - 1) < 0.01
+  }), 'The square canvas must keep its aspect ratio within the available preview height')
   await mkdir('.playwright-mcp', { recursive: true })
   await page.screenshot({ path: '.playwright-mcp/audit-fixed-desktop.png', fullPage: true })
   await page.setViewportSize({ width: 390, height: 844 })
@@ -151,7 +167,7 @@ test('browser: legacy history, Blob storage, reference cleanup, masks and respon
     await new Promise(resolve => { tx.oncomplete = resolve }); db.close()
   })
   await other.evaluate(() => window.auditResumeMigration())
-  await other.waitForFunction(() => document.querySelector('.rail-head')?.textContent.includes('3'))
+  await other.waitForFunction(() => document.querySelector('.rail-head')?.textContent.includes('4'))
   assert.equal(await page.evaluate(async () => {
     const db = await new Promise(resolve => { const req = indexedDB.open('huitu-prints'); req.onsuccess = () => resolve(req.result) })
     const row = await new Promise(resolve => { const req = db.transaction('prints').objectStore('prints').get('migration-race'); req.onsuccess = () => resolve(req.result) })
@@ -166,7 +182,7 @@ test('browser: legacy history, Blob storage, reference cleanup, masks and respon
   })
   const recovery = await context.newPage()
   await recovery.goto(`http://127.0.0.1:${port}`)
-  await recovery.waitForFunction(() => document.querySelector('.rail-head')?.textContent.includes('4'))
+  await recovery.waitForFunction(() => document.querySelector('.rail-head')?.textContent.includes('5'))
   assert.ok(await recovery.evaluate(async () => {
     const db = await new Promise(resolve => { const req = indexedDB.open('huitu-prints'); req.onsuccess = () => resolve(req.result) })
     const row = await new Promise(resolve => { const req = db.transaction('prints').objectStore('prints').get('decode-failure'); req.onsuccess = () => resolve(req.result) })
@@ -174,4 +190,63 @@ test('browser: legacy history, Blob storage, reference cleanup, masks and respon
   }))
   await recovery.close()
   assert.deepEqual(errors, [])
+})
+
+test('browser: valid params survive a reload after leaving the FHD preset', { timeout: 30000 }, async t => {
+  const { page, port } = await browserApp(t)
+  await page.goto(`http://127.0.0.1:${port}`)
+  await page.getByRole('button', { name: 'FHD', exact: true }).click()
+  await page.getByRole('button', { name: '比例', exact: true }).click()
+  await page.getByRole('button', { name: '16:9', exact: true }).click()
+  await page.getByRole('button', { name: '长边 2048', exact: true }).click()
+  await page.getByLabel('图像质量', { exact: true }).selectOption('high')
+  const before = await page.evaluate(() => JSON.parse(localStorage.getItem('huitu.params.v1')))
+  await page.reload()
+  const after = await page.evaluate(() => JSON.parse(localStorage.getItem('huitu.params.v1')))
+  assert.deepEqual(after, before)
+  assert.equal(await page.getByRole('button', { name: '比例', exact: true }).getAttribute('class'), 'is-on')
+})
+
+test('browser: malformed legacy history does not block reading, deletion or clearing', { timeout: 30000 }, async t => {
+  const { page, port } = await browserApp(t)
+  await page.route(`http://127.0.0.1:${port}/audit-seed`, route => route.fulfill({ contentType: 'text/html', body: '<html><body></body></html>' }))
+  await page.goto(`http://127.0.0.1:${port}/audit-seed`)
+  await page.evaluate(async () => {
+    const canvas = document.createElement('canvas'); canvas.width = 32; canvas.height = 32
+    const db = await new Promise((resolve, reject) => {
+      const req = indexedDB.open('huitu-prints', 1)
+      req.onupgradeneeded = () => { const store = req.result.createObjectStore('prints', { keyPath: 'id' }); store.createIndex('createdAt', 'createdAt') }
+      req.onsuccess = () => resolve(req.result); req.onerror = () => reject(req.error)
+    })
+    const tx = db.transaction('prints', 'readwrite')
+    for (const [index, id] of ['good', 'bad-delete', 'bad-clear'].entries()) {
+      tx.objectStore('prints').put({ id, createdAt: index + 1, prompt: id, model: 'mock', mode: 'generate', size: '32x32', quality: 'auto', background: 'opaque', format: 'png', n: 1, dataUrl: id === 'good' ? canvas.toDataURL('image/png') : 'data:image/png;base64,%' })
+    }
+    await new Promise((resolve, reject) => { tx.oncomplete = resolve; tx.onerror = () => reject(tx.error) })
+    db.close()
+  })
+  await page.goto(`http://127.0.0.1:${port}`)
+  await page.waitForFunction(() => document.querySelectorAll('.strip').length === 3, undefined, { timeout: 3000 })
+  await page.locator('.strip > button[title="good"]').click()
+  await page.locator('img.frame').waitFor()
+  const retained = await page.evaluate(async () => {
+    const db = await new Promise(resolve => { const r = indexedDB.open('huitu-prints'); r.onsuccess = () => resolve(r.result) })
+    const raw = await new Promise(resolve => { const r = db.transaction('images').objectStore('images').get('bad-delete'); r.onsuccess = () => resolve(r.result) })
+    const row = await new Promise(resolve => { const r = db.transaction('prints').objectStore('prints').get('bad-delete'); r.onsuccess = () => resolve(r.result) })
+    db.close()
+    return { source: raw?.dataUrl, thumbnail: row.thumbnail?.startsWith('data:image/'), hasFullData: !!row.dataUrl }
+  })
+  assert.deepEqual(retained, { source: 'data:image/png;base64,%', thumbnail: true, hasFullData: false })
+  const damagedStrip = page.locator('.strip').filter({ has: page.locator('button[title="bad-delete"]') })
+  await damagedStrip.hover()
+  await damagedStrip.getByRole('button', { name: '删除', exact: true }).click()
+  await page.waitForFunction(() => document.querySelectorAll('.strip').length === 2)
+  await page.getByRole('button', { name: '中转站', exact: true }).click()
+  await page.getByRole('button', { name: '清空底片', exact: true }).click()
+  await page.waitForFunction(() => document.querySelectorAll('.strip').length === 0)
+  assert.deepEqual(await page.evaluate(async () => {
+    const db = await new Promise(resolve => { const r = indexedDB.open('huitu-prints'); r.onsuccess = () => resolve(r.result) })
+    const counts = await Promise.all(['prints', 'images'].map(name => new Promise(resolve => { const r = db.transaction(name).objectStore(name).count(); r.onsuccess = () => resolve(r.result) })))
+    db.close(); return counts
+  }), [0, 0])
 })

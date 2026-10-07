@@ -1,6 +1,6 @@
 import type { Params, Settings } from '../types.js'
 import { defaultParams, defaultSettings } from './defaults.js'
-import { ASPECTS, resolveSize, validateSize } from './size.js'
+import { ASPECTS, parseSize, resolveSize, validateSize } from './size.js'
 import { parseExtra } from './api.js'
 
 function object(value: unknown): asserts value is Record<string, unknown> {
@@ -36,7 +36,7 @@ export function validateParams(value: unknown): asserts value is Partial<Params>
     } else if (key === 'stream') {
       if (typeof field !== 'boolean') throw new Error('stream 必须为布尔值')
     } else if (key === 'sizePreset') {
-      if (typeof field !== 'string' || !validateSize(field).ok) throw new Error('预设尺寸无效')
+      if (typeof field !== 'string' || (field !== 'auto' && !parseSize(field))) throw new Error('预设尺寸无效')
     } else {
       const [min, max] = key === 'n' ? [1, 10] : key === 'compression' ? [0, 100] : key === 'partialImages' ? [0, 3] : [16, 3840]
       if (!Number.isInteger(field) || Number(field) < min || Number(field) > max) throw new Error(`参数超出范围：${key}`)

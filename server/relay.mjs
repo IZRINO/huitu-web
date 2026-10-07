@@ -98,7 +98,19 @@ export async function handleRelay(req, res) {
     timer = setTimeout(() => controller.abort(new RelayError(504, 'Relay request timed out')), TIMEOUT)
     let url
     try { url = new URL(String(req.headers['x-relay-url'] || '')) } catch { throw new RelayError(400, 'Invalid relay URL') }
-    const address = await targetAddress(url)
+    controller.signal.throwIfAborted()
+    let stopLookup
+    const cancelled = new Promise((_, reject) => {
+      stopLookup = () => reject(controller.signal.reason)
+      controller.signal.addEventListener('abort', stopLookup, { once: true })
+    })
+    let address
+    try {
+      // DNS lookup cannot be cancelled; stop waiting when the request ends.
+      address = await Promise.race([targetAddress(url), cancelled])
+    } finally {
+      controller.signal.removeEventListener('abort', stopLookup)
+    }
     controller.signal.throwIfAborted()
     const headers = upstreamHeaders(req)
     outgoing = (url.protocol === 'https:' ? httpsRequest : httpRequest)(url, {

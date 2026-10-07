@@ -137,7 +137,7 @@ export function SettingsDrawer({ settings, params, onChange, onParams, onClose, 
         </div>
         {settings.useProxy && (
           <div className="field">
-            <label htmlFor="relayToken">代理访问令牌（可选）</label>
+            <label htmlFor="relayToken">代理访问令牌（受保护部署填写）</label>
             <input id="relayToken" type="password" value={settings.relayToken || ''} onChange={(e) => patch({ relayToken: e.target.value.trim() })} autoComplete="off" />
           </div>
         )}

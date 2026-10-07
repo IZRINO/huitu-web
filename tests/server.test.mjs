@@ -12,7 +12,7 @@ async function serve(t, env = {}, nodeArgs = []) {
   const port = reservation.address().port
   await new Promise(resolve => reservation.close(resolve))
   const child = spawn(process.execPath, [...nodeArgs, 'server.mjs'], {
-    env: { ...process.env, HOST: '127.0.0.1', PORT: String(port), HUITU_RELAY_TOKEN: 'audit-token', HUITU_RELAY_ALLOWED_HOSTS: '', ...env },
+    env: { ...process.env, HOST: '127.0.0.1', PORT: String(port), HUITU_RELAY_TOKEN: 'audit-token', HUITU_RELAY_PUBLIC: '', HUITU_RELAY_ALLOWED_HOSTS: '', ...env },
     stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
   })
   let stderr = ''
@@ -59,6 +59,43 @@ test('configured relay token is required separately from the upstream key', asyn
   const target = await upstream(t, (_req, res) => res.end('private'))
   const server = await serve(t)
   assert.equal((await server.get('/api/relay', { 'x-relay-url': target, Authorization: 'Bearer upstream-key' })).status, 403)
+})
+
+test('explicit public relay forwards the upstream key without a relay token', async t => {
+  const target = await upstream(t, (req, res) => {
+    assert.equal(req.headers.authorization, 'Bearer upstream-key')
+    assert.equal(req.headers['x-relay-token'], undefined)
+    res.end('{"data":[{"id":"gpt-image-mock"}]}')
+  })
+  const server = await serve(t, { HOST: '0.0.0.0', HUITU_RELAY_TOKEN: '', HUITU_RELAY_PUBLIC: 'true', HUITU_RELAY_ALLOWED_HOSTS: '127.0.0.1' })
+  const result = await server.get('/api/relay', { 'x-relay-url': target, Authorization: 'Bearer upstream-key', Host: 'images.example' })
+  assert.equal(result.status, 200)
+  assert.match(result.body, /gpt-image-mock/)
+})
+
+test('public relay rejects missing keys, cross-origin requests, private targets and non-image endpoints', async t => {
+  let hits = 0
+  const target = await upstream(t, (_req, res) => { hits++; res.end('unexpected') })
+  const server = await serve(t, { HUITU_RELAY_TOKEN: '', HUITU_RELAY_PUBLIC: 'true' })
+  const headers = { 'x-relay-url': target, Authorization: 'Bearer upstream-key', Host: 'images.example' }
+  for (const Authorization of ['', 'Bearer ', 'Basic upstream-key']) {
+    assert.equal((await server.get('/api/relay', { ...headers, Authorization })).status, 401)
+  }
+  assert.equal((await server.get('/api/relay', { ...headers, Origin: 'https://untrusted.example' })).status, 403)
+  assert.equal((await server.get('/api/relay', { ...headers, 'Sec-Fetch-Site': 'cross-site' })).status, 403)
+  assert.equal((await server.get('/api/relay', headers)).status, 400)
+  for (const [path, method] of [['/v1/chat/completions', 'POST'], ['/v1/models', 'POST'], ['/v1/images/generations', 'GET']]) {
+    const result = await server.get('/api/relay', { ...headers, 'x-relay-url': `https://api.openai.com${path}` }, method)
+    assert.equal(result.status, 400)
+  }
+  assert.equal(hits, 0)
+})
+
+test('configured tokens take precedence over public relay mode', async t => {
+  const server = await serve(t, { HUITU_RELAY_PUBLIC: 'true' })
+  const result = await server.get('/api/relay', { 'x-relay-url': 'https://api.openai.com/v1/models', Authorization: 'Bearer upstream-key' })
+  assert.equal(result.status, 403)
+  assert.equal(JSON.parse(result.body).error.code, 'RELAY_TOKEN_REQUIRED')
 })
 
 test('relay rejects loopback targets unless explicitly allowed', async t => {

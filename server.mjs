@@ -4,12 +4,12 @@ import { createServer } from 'node:http'
 import { extname, join, resolve, relative, isAbsolute } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { pipeline } from 'node:stream/promises'
-import { handleRelay } from './server/relay.mjs'
+import { handleRelay, publicRelay } from './server/relay.mjs'
 
 const root = resolve(fileURLToPath(new URL('.', import.meta.url)), 'dist')
 const port = Number(process.env.PORT || 4173)
 const host = process.env.HOST || '127.0.0.1'
-if (!['127.0.0.1', '::1', 'localhost'].includes(host) && !process.env.HUITU_RELAY_TOKEN) throw new Error('Network access requires HUITU_RELAY_TOKEN')
+if (!['127.0.0.1', '::1', 'localhost'].includes(host) && !process.env.HUITU_RELAY_TOKEN && !publicRelay) throw new Error('Network access requires HUITU_RELAY_TOKEN or explicit HUITU_RELAY_PUBLIC=true')
 
 const MIME = {
   '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8',

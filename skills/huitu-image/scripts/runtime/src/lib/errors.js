@@ -15,6 +15,9 @@ export function describeHttp(status, bodyText) {
     }
     const msg = parsed?.error?.message || parsed?.message || bodyText.slice(0, 280);
     const code = parsed?.error?.code;
+    if (status === 403 && (code === 'RELAY_TOKEN_REQUIRED' || msg === 'Relay token is required')) {
+        return '本站代理需要访问令牌，请在中转站设置中填写代理访问令牌；该令牌由部署管理员提供，与上游 API Key 不同';
+    }
     if (code === 'moderation_blocked') {
         const cats = parsed?.error?.moderation_details?.categories?.join('、');
         return cats ? `审核拦截：${cats}` : '审核拦截，换一条配方再试';

@@ -2,6 +2,17 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { browserModules } from './browser-modules.mjs'
 
+test('relay authentication errors identify the separate deployment token', async t => {
+  const load = await browserModules(t)
+  const { describeHttp } = await load('errors')
+  for (const error of [{ message: 'Relay token is required' }, { message: 'Relay authentication failed', code: 'RELAY_TOKEN_REQUIRED' }]) {
+    const message = describeHttp(403, JSON.stringify({ error }))
+    assert.match(message, /代理访问令牌/)
+    assert.match(message, /API Key/)
+  }
+  assert.equal(describeHttp(403, '{"error":{"message":"upstream denied"}}'), 'upstream denied')
+})
+
 test('web config export removes credentials from extra headers', async t => {
   const load = await browserModules(t)
   const { exportConfig } = await load('storage')

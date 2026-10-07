@@ -6,12 +6,12 @@ import { once } from 'node:events'
 import { mkdir } from 'node:fs/promises'
 import { chromium } from 'playwright'
 
-async function browserApp(t) {
+async function browserApp(t, env = {}) {
   const reservation = createServer()
   await new Promise(resolve => reservation.listen(0, '127.0.0.1', resolve))
   const port = reservation.address().port
   await new Promise(resolve => reservation.close(resolve))
-  const child = spawn(process.execPath, ['server.mjs'], { env: { ...process.env, PORT: String(port), HOST: '127.0.0.1', HUITU_RELAY_TOKEN: '' }, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] })
+  const child = spawn(process.execPath, ['server.mjs'], { env: { ...process.env, PORT: String(port), HOST: '127.0.0.1', HUITU_RELAY_TOKEN: '', HUITU_RELAY_PUBLIC: '', HUITU_RELAY_ALLOWED_HOSTS: '', ...env }, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] })
   t.after(async () => { if (child.exitCode === null) { child.kill(); await once(child, 'exit') } })
   await once(child.stdout, 'data')
   const browser = await chromium.launch({ headless: true, ...(process.env.PLAYWRIGHT_CHANNEL ? { channel: process.env.PLAYWRIGHT_CHANNEL } : process.platform === 'win32' ? { channel: 'msedge' } : {}) })
@@ -20,6 +20,63 @@ async function browserApp(t) {
   const page = await context.newPage()
   return { context, page, port }
 }
+
+test('browser: URL and API key work through the public relay, and protected relays explain their token', { timeout: 60000 }, async t => {
+  for (const protectedRelay of [false, true]) {
+    await t.test(protectedRelay ? 'protected relay' : 'public relay', async t => {
+      const { page, port } = await browserApp(t, { HUITU_RELAY_PUBLIC: 'true', HUITU_RELAY_TOKEN: protectedRelay ? 'browser-token' : '', HUITU_RELAY_ALLOWED_HOSTS: '127.0.0.1' })
+      await page.goto(`http://127.0.0.1:${port}`)
+      const png = await page.evaluate(() => {
+        const canvas = document.createElement('canvas'); canvas.width = 32; canvas.height = 32
+        const ctx = canvas.getContext('2d'); ctx.fillStyle = '#168576'; ctx.fillRect(0, 0, 32, 32)
+        return canvas.toDataURL('image/png').split(',')[1]
+      })
+      const requests = []
+      const upstream = createServer((req, res) => {
+        const chunks = []
+        req.on('data', chunk => chunks.push(chunk))
+        req.on('end', () => {
+          requests.push({ method: req.method, path: req.url, headers: req.headers, body: Buffer.concat(chunks) })
+          res.writeHead(200, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify(req.url === '/v1/models' ? { data: [{ id: 'gpt-image-mock' }] } : { data: [{ b64_json: png }] }))
+        })
+      })
+      await new Promise(resolve => upstream.listen(0, '127.0.0.1', resolve))
+      t.after(async () => { upstream.closeAllConnections(); await new Promise(resolve => upstream.close(resolve)) })
+      await page.getByRole('button', { name: '中转站', exact: true }).click()
+      await page.getByLabel('接口根地址', { exact: true }).fill(`http://127.0.0.1:${upstream.address().port}/v1`)
+      await page.getByLabel('密钥', { exact: true }).fill('browser-upstream-key')
+      await page.getByRole('button', { name: '探测连通', exact: true }).click()
+      if (protectedRelay) {
+        await page.getByText(/该令牌由部署管理员提供，与上游 API Key 不同/).waitFor()
+        assert.equal(requests.length, 0)
+        await page.getByLabel('代理访问令牌（受保护部署填写）', { exact: true }).fill('browser-token')
+        await page.getByRole('button', { name: '探测连通', exact: true }).click()
+      }
+      await page.getByText(/已接通，模型列表含图像模型/).waitFor()
+      await page.getByRole('button', { name: '关闭', exact: true }).click()
+      await page.locator('.prompt-dock textarea').fill('relay regression')
+      await page.getByRole('button', { name: '生成图像', exact: true }).click()
+      await page.waitForFunction(() => document.querySelector('.rail-head')?.textContent.includes('1'))
+      await page.getByRole('button', { name: '改图', exact: true }).click()
+      await page.getByRole('button', { name: '当前片作底' }).click()
+      await page.getByRole('button', { name: '应用编辑', exact: true }).click()
+      await page.waitForFunction(() => document.querySelector('.rail-head')?.textContent.includes('2'))
+      assert.deepEqual(requests.map(({ method, path }) => [method, path]), [['GET', '/v1/models'], ['POST', '/v1/images/generations'], ['POST', '/v1/images/edits']])
+      assert.ok(requests.every(({ headers }) => headers.authorization === 'Bearer browser-upstream-key' && !headers['x-relay-token']))
+      assert.equal(JSON.parse(requests[1].body.toString()).prompt, 'relay regression')
+      const editForm = await new Response(requests[2].body, { headers: { 'Content-Type': requests[2].headers['content-type'] } }).formData()
+      assert.equal(editForm.getAll('image').length, 1)
+      assert.equal(editForm.get('image').type, 'image/png')
+      await page.getByRole('button', { name: '中转站', exact: true }).click()
+      await mkdir('.playwright-mcp', { recursive: true })
+      await page.screenshot({ path: `.playwright-mcp/relay-${protectedRelay ? 'protected' : 'public'}-desktop.png`, fullPage: true })
+      await page.setViewportSize({ width: 390, height: 844 })
+      assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth))
+      await page.screenshot({ path: `.playwright-mcp/relay-${protectedRelay ? 'protected' : 'public'}-mobile.png`, fullPage: true })
+    })
+  }
+})
 
 test('browser: legacy history, Blob storage, reference cleanup, masks and responsive layout', { timeout: 90000 }, async t => {
   const { context, page, port } = await browserApp(t)

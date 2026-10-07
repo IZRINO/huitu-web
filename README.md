@@ -84,7 +84,12 @@ npm start
 
 `npm start` 会托管 `dist` 并继续提供 `/api/relay`。端口默认 `4173`，可用环境变量 `PORT` 修改。
 
-服务默认只监听 `127.0.0.1`。对外部署需要同时设置 `HOST` 和独立的 `HUITU_RELAY_TOKEN`，然后在网页「中转站」填写代理访问令牌；CLI 使用 `--relay-token`。该令牌与上游 API 密钥互相独立，配置导出会移除令牌及额外请求头。
+服务默认只监听 `127.0.0.1`。对外部署有两种模式：
+
+- 受保护模式：设置 `HOST` 和独立的 `HUITU_RELAY_TOKEN`，网页「中转站」必须填写代理访问令牌；CLI 使用 `--relay-token`。该令牌与上游 API 密钥互相独立，配置导出会移除令牌及额外请求头。
+- 公共站点模式：设置 `HOST`、`HUITU_RELAY_PUBLIC=true`，并将 `HUITU_RELAY_TOKEN` 留空。使用者只需填写上游 URL 和 API Key；代理只接受带 Bearer 密钥的模型列表与图片生成/编辑请求。这是公开代理模式，API Key 由上游验证，不作为本站访问控制。默认私网拦截、跨来源检查、重定向、体积、超时和并发限制仍然生效；公共部署应保持 `HUITU_RELAY_ALLOWED_HOSTS` 为空。
+
+非空的 `HUITU_RELAY_TOKEN` 始终优先于公共模式，防止现有受保护部署被意外开放。
 
 代理默认拒绝私网、回环、链路本地和保留地址；域名解析后固定连接地址，且不跟随重定向。确需本地或内网中转时，用 `HUITU_RELAY_ALLOWED_HOSTS` 指定允许的精确主机名，以逗号分隔，例如 `127.0.0.1,my-relay.internal`，不支持通配符。修改这些环境变量后重启服务。
 

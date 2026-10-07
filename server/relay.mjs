@@ -10,12 +10,13 @@ const MAX_BYTES = Number(process.env.HUITU_RELAY_MAX_BYTES || 128 * 1024 * 1024)
 const TIMEOUT = Number(process.env.HUITU_RELAY_TIMEOUT_MS || 600000)
 if (!Number.isSafeInteger(MAX_BYTES) || MAX_BYTES <= 0 || !Number.isSafeInteger(TIMEOUT) || TIMEOUT <= 0 || TIMEOUT > 2147483647) throw new Error('Relay size and timeout limits must be positive integers')
 const TOKEN = process.env.HUITU_RELAY_TOKEN || ''
+export const publicRelay = process.env.HUITU_RELAY_PUBLIC === 'true' && !TOKEN
 const ALLOWED = new Set((process.env.HUITU_RELAY_ALLOWED_HOSTS || '').split(',').map(host => host.trim().toLowerCase()).filter(Boolean))
 const FORBIDDEN_HEADERS = new Set(['host', 'connection', 'content-length', 'transfer-encoding', 'upgrade', 'expect', 'trailer', 'te', 'proxy-authorization', 'proxy-connection'])
 let active = 0
 
 class RelayError extends Error {
-  constructor(status, message) { super(message); this.status = status }
+  constructor(status, message, code) { super(message); this.status = status; this.code = code }
 }
 
 export function publicAddress(address) {
@@ -38,16 +39,19 @@ export async function targetAddress(url, resolver = lookup) {
 }
 
 function authorize(req) {
+  if (req.headers['sec-fetch-site'] === 'cross-site') throw new RelayError(403, 'Cross-origin relay requests are blocked')
   const origin = req.headers.origin
   if (origin) {
     let parsed
     try { parsed = new URL(origin) } catch { throw new RelayError(403, 'Invalid request origin') }
-    if (!['http:', 'https:'].includes(parsed.protocol) || parsed.host !== req.headers.host || req.headers['sec-fetch-site'] === 'cross-site') throw new RelayError(403, 'Cross-origin relay requests are blocked')
+    if (!['http:', 'https:'].includes(parsed.protocol) || parsed.host !== req.headers.host) throw new RelayError(403, 'Cross-origin relay requests are blocked')
   }
   if (TOKEN) {
     const supplied = Buffer.from(String(req.headers['x-relay-token'] || ''))
     const expected = Buffer.from(TOKEN)
-    if (supplied.length !== expected.length || !timingSafeEqual(supplied, expected)) throw new RelayError(403, 'Relay token is required')
+    if (supplied.length !== expected.length || !timingSafeEqual(supplied, expected)) throw new RelayError(403, 'Relay token is required', 'RELAY_TOKEN_REQUIRED')
+  } else if (publicRelay) {
+    if (!/^Bearer\s+\S+$/i.test(String(req.headers.authorization || ''))) throw new RelayError(401, 'Upstream API key is required')
   } else if (!ipaddr.isValid(req.socket.remoteAddress || '') || ipaddr.process(req.socket.remoteAddress).range() !== 'loopback') {
     throw new RelayError(403, 'Remote relay access requires HUITU_RELAY_TOKEN')
   } else {
@@ -78,7 +82,7 @@ function fail(res, error) {
   if (res.destroyed || res.writableEnded) return
   if (res.headersSent) { res.destroy(); return }
   res.writeHead(error instanceof RelayError ? error.status : 502, { 'Content-Type': 'application/json; charset=utf-8', Connection: 'close' })
-  res.end(JSON.stringify({ error: { message: error instanceof RelayError ? error.message : 'Relay upstream failed' } }))
+  res.end(JSON.stringify({ error: { message: error instanceof RelayError ? error.message : 'Relay upstream failed', ...(error instanceof RelayError && error.code ? { code: error.code } : {}) } }))
 }
 
 export async function handleRelay(req, res) {
@@ -98,6 +102,10 @@ export async function handleRelay(req, res) {
     timer = setTimeout(() => controller.abort(new RelayError(504, 'Relay request timed out')), TIMEOUT)
     let url
     try { url = new URL(String(req.headers['x-relay-url'] || '')) } catch { throw new RelayError(400, 'Invalid relay URL') }
+    if (publicRelay && !((req.method === 'GET' && url.pathname.endsWith('/models')) ||
+      (req.method === 'POST' && /\/images\/(generations|edits)$/.test(url.pathname)))) {
+      throw new RelayError(400, 'Public relay only supports model listing and image requests')
+    }
     controller.signal.throwIfAborted()
     let stopLookup
     const cancelled = new Promise((_, reject) => {
